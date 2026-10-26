@@ -76,18 +76,4 @@ CV_3D_GESTURE/
 ├── README.md                       # Project index and documentation portal
 ├── ARCHITECTURE.md                 # System architecture and data flow
 └── DEVELOPMENT_PLAN.md             # Phased implementation roadmap
-```
 
----
-
-## 🔍 Phase 0 Verification on Windows
-
-In this planning phase, only documentation and repository structure are established. To inspect the planning artifacts:
-
-```powershell
-# Navigate into the project folder
-cd c:\Users\munir\Music\folder1\CV_3D_GESTURE
-
-# List all documentation and scaffold files
-Get-ChildItem -Recurse -File | Select-Object FullName
-```

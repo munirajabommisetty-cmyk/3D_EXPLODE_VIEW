@@ -1,0 +1,306 @@
+/**
+ * CAD Assembly Hierarchy Tree Panel Styling
+ * Phase 9 - Task 9.5
+ */
+
+.assembly-tree-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  color: var(--cad-text-primary, #f9fafb);
+  font-size: 0.8rem;
+  user-select: none;
+}
+
+/* 1. Filter Search Bar */
+.tree-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.tree-filter-bar:focus-within {
+  border-color: var(--cad-accent-cyan, #06b6d4);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.2);
+}
+
+.filter-search-icon {
+  font-size: 0.8rem;
+  color: var(--cad-text-muted, #6b7280);
+}
+
+.tree-filter-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--cad-text-primary, #f9fafb);
+  font-size: 0.76rem;
+  outline: none;
+}
+
+.tree-filter-input::placeholder {
+  color: var(--cad-text-muted, #6b7280);
+}
+
+.filter-clear-btn {
+  background: transparent;
+  border: none;
+  color: var(--cad-text-muted, #6b7280);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 0.75rem;
+  border-radius: 3px;
+  transition: all 0.15s ease;
+}
+
+.filter-clear-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--cad-text-primary, #f9fafb);
+}
+
+/* 2. Scrollable Tree Content */
+.tree-content-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 4px;
+}
+
+.tree-node-group {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 3. Node Row */
+.tree-node-row {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  padding-right: 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+  position: relative;
+  gap: 6px;
+  border-left: 3px solid transparent;
+}
+
+.tree-node-row:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.tree-node-row:focus-visible {
+  outline: 2px solid var(--cad-accent-cyan, #06b6d4);
+  outline-offset: -2px;
+}
+
+/* Assembly and Subassembly Row Styling */
+.tree-node-row.assembly {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.tree-node-row.subassembly {
+  font-weight: 500;
+  color: var(--cad-text-secondary, #9ca3af);
+}
+
+.tree-node-row.component {
+  font-weight: 400;
+  color: var(--cad-text-primary, #f9fafb);
+}
+
+/* Selected Component Row */
+.tree-node-row.selected {
+  background-color: rgba(6, 182, 212, 0.14);
+  border-left: 3px solid var(--cad-accent-cyan, #06b6d4);
+  color: #ffffff;
+}
+
+.tree-node-row.selected .node-label {
+  color: var(--cad-accent-cyan, #06b6d4);
+  font-weight: 600;
+}
+
+/* Hidden Component Row */
+.tree-node-row.hidden-node {
+  opacity: 0.5;
+}
+
+.tree-node-row.hidden-node .node-label {
+  text-decoration: line-through;
+  color: var(--cad-text-muted, #6b7280);
+}
+
+/* Caret Button */
+.tree-caret-btn {
+  background: transparent;
+  border: none;
+  color: var(--cad-text-muted, #6b7280);
+  cursor: pointer;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.tree-caret-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--cad-text-primary, #f9fafb);
+}
+
+.caret-icon {
+  font-size: 0.65rem;
+  transition: transform 0.16s ease;
+  display: inline-block;
+}
+
+.caret-icon.open {
+  transform: rotate(90deg);
+}
+
+.tree-leaf-spacer {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.15);
+  font-size: 0.65rem;
+  flex-shrink: 0;
+}
+
+/* Node Icons and Labels */
+.node-type-icon {
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.node-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.77rem;
+}
+
+.node-children-count {
+  font-size: 0.68rem;
+  color: var(--cad-text-muted, #6b7280);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 10px;
+  margin-right: 4px;
+}
+
+/* Visibility Toggle Button */
+.tree-visibility-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: var(--cad-text-muted, #6b7280);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.12s ease;
+  flex-shrink: 0;
+}
+
+.tree-visibility-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--cad-text-primary, #f9fafb);
+}
+
+.tree-visibility-btn.hidden {
+  color: var(--cad-accent-amber, #f59e0b);
+}
+
+.visibility-icon {
+  font-size: 0.82rem;
+}
+
+/* 4. Empty and No-Matches States */
+.assembly-tree-empty,
+.assembly-tree-no-matches {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px 12px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px dashed var(--cad-border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  margin-top: 10px;
+}
+
+.empty-icon {
+  font-size: 1.8rem;
+  margin-bottom: 8px;
+}
+
+.empty-title {
+  font-weight: 600;
+  color: var(--cad-text-primary, #f9fafb);
+  margin-bottom: 4px;
+  font-size: 0.85rem;
+}
+
+.empty-desc,
+.no-matches-text {
+  font-size: 0.74rem;
+  color: var(--cad-text-secondary, #9ca3af);
+  line-height: 1.4;
+  margin-bottom: 10px;
+}
+
+.clear-search-action-btn,
+.unhide-all-btn {
+  padding: 4px 10px;
+  background: rgba(6, 182, 212, 0.15);
+  border: 1px solid var(--cad-accent-cyan, #06b6d4);
+  border-radius: 4px;
+  color: var(--cad-accent-cyan, #06b6d4);
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.clear-search-action-btn:hover,
+.unhide-all-btn:hover {
+  background: var(--cad-accent-cyan, #06b6d4);
+  color: #0b0f19;
+}
+
+/* 5. Footer Summary */
+.tree-footer-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  font-size: 0.7rem;
+  color: var(--cad-text-muted, #6b7280);
+  flex-shrink: 0;
+}

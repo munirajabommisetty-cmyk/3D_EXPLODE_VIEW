@@ -1,0 +1,758 @@
+/**
+ * CAD-Style Technical Workspace Layout & Component Styling
+ * Clean, Modern, Professional Dark CAD Design
+ */
+
+/* 1. Overall Shell */
+.cad-workspace-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background-color: var(--cad-bg-app, #080c14);
+  color: var(--cad-text-primary, #f8fafc);
+  position: relative;
+}
+
+/* 2. Top Navigation Toolbar (48px) */
+.workspace-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  min-height: 48px;
+  padding: 0 16px;
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  z-index: 50;
+  gap: 16px;
+}
+
+.top-bar-branding {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.brand-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: #ffffff;
+  letter-spacing: -0.01em;
+}
+
+.brand-icon {
+  font-size: 1.1rem;
+}
+
+.breadcrumb-separator {
+  color: var(--cad-text-muted, #64748b);
+  font-size: 0.8rem;
+  user-select: none;
+}
+
+.workspace-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+}
+
+.domain-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.domain-tag.mechanical {
+  background: rgba(14, 165, 233, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  color: var(--cad-accent-cyan-light, #38bdf8);
+}
+
+.domain-tag.civil {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--cad-accent-amber, #f59e0b);
+}
+
+.breadcrumb-subsystem {
+  color: var(--cad-text-secondary, #94a3af);
+}
+
+.breadcrumb-model {
+  color: var(--cad-text-primary, #ffffff);
+  font-weight: 600;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Toolbar Control Buttons */
+.top-bar-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  color: var(--cad-text-secondary, #94a3af);
+  font-size: 0.76rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.toolbar-btn:hover {
+  background: rgba(30, 41, 59, 0.95);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.toolbar-btn:active {
+  transform: scale(0.98);
+}
+
+.toolbar-btn:focus-visible {
+  outline: 2px solid var(--cad-border-focus, #38bdf8);
+  outline-offset: 1px;
+}
+
+.toolbar-btn.active {
+  background: rgba(14, 165, 233, 0.18);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: var(--cad-accent-cyan-light, #38bdf8);
+  font-weight: 600;
+}
+
+.toolbar-btn.catalogue-btn {
+  background: rgba(14, 165, 233, 0.12);
+  border-color: rgba(56, 189, 248, 0.3);
+  color: var(--cad-accent-cyan-light, #38bdf8);
+}
+
+.btn-icon {
+  font-size: 0.85rem;
+}
+
+/* Toolbar Telemetry Indicators */
+.top-bar-telemetry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.telemetry-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  background: rgba(8, 12, 20, 0.7);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 9999px;
+  font-size: 0.74rem;
+}
+
+.telemetry-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--cad-accent-green, #10b981);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+
+.telemetry-label {
+  color: var(--cad-text-muted, #64748b);
+}
+
+.telemetry-value {
+  color: #34d399;
+  font-family: var(--cad-font-mono, monospace);
+  font-weight: 600;
+}
+
+.camera-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  background: rgba(8, 12, 20, 0.7);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 9999px;
+  font-size: 0.74rem;
+  color: var(--cad-text-secondary, #94a3af);
+}
+
+.cam-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--cad-text-muted, #64748b);
+}
+
+.camera-pill.active .cam-indicator {
+  background-color: var(--cad-accent-green, #10b981);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.7);
+}
+
+.camera-pill.requesting .cam-indicator {
+  background-color: var(--cad-accent-cyan-light, #38bdf8);
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.7);
+  animation: pulse 1s infinite alternate;
+}
+
+.camera-pill.denied .cam-indicator,
+.camera-pill.error .cam-indicator,
+.camera-pill.not_found .cam-indicator {
+  background-color: var(--cad-accent-red, #ef4444);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+}
+
+@keyframes pulse {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+.telemetry-gesture-badge {
+  display: flex;
+  align-items: center;
+}
+
+/* 3. Main Workspace Area */
+.workspace-main-area {
+  display: flex;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  min-height: 0;
+  height: calc(100vh - 48px - 32px);
+  height: calc(100dvh - 48px - 32px);
+}
+
+/* CAD Docks */
+.cad-dock {
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-color: var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  z-index: 20;
+  transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 0.2s ease;
+  overflow: hidden;
+  height: 100%;
+  min-height: 0;
+  flex-shrink: 0;
+}
+
+.cad-dock-left {
+  width: 280px;
+  border-right: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.cad-dock-left.collapsed {
+  width: 0;
+  border-right: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cad-dock-right {
+  width: 320px;
+  border-left: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.cad-dock-right.collapsed {
+  width: 0;
+  border-left: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: rgba(8, 12, 20, 0.5);
+  border-bottom: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  min-height: 42px;
+}
+
+.dock-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dock-icon {
+  font-size: 0.95rem;
+}
+
+.dock-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--cad-text-primary, #ffffff);
+  margin: 0;
+}
+
+.dock-collapse-btn {
+  background: transparent;
+  border: none;
+  color: var(--cad-text-muted, #64748b);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  transition: all 0.15s ease;
+}
+
+.dock-collapse-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.dock-collapse-btn:focus-visible {
+  outline: 2px solid var(--cad-border-focus, #38bdf8);
+}
+
+.dock-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Dock Filter Input Bar */
+.dock-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  background: rgba(8, 12, 20, 0.6);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: 6px;
+}
+
+.filter-icon {
+  font-size: 0.78rem;
+  color: var(--cad-text-muted, #64748b);
+}
+
+.dock-filter-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--cad-text-primary, #ffffff);
+  font-size: 0.76rem;
+  outline: none;
+}
+
+.dock-filter-input::placeholder {
+  color: var(--cad-text-muted, #64748b);
+}
+
+/* CAD Placeholder Card */
+.cad-placeholder-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: rgba(8, 12, 20, 0.5);
+  border: 1px dashed var(--cad-border-medium, rgba(255, 255, 255, 0.16));
+  border-radius: 8px;
+}
+
+.placeholder-badge {
+  align-self: flex-start;
+  padding: 2px 6px;
+  background: rgba(14, 165, 233, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 4px;
+  color: var(--cad-accent-cyan-light, #38bdf8);
+  font-size: 0.66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.placeholder-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 0;
+}
+
+.placeholder-text {
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--cad-text-secondary, #94a3af);
+  margin: 0;
+}
+
+.model-summary-box {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+}
+
+.summary-label {
+  color: var(--cad-text-muted, #64748b);
+}
+
+.summary-val {
+  color: var(--cad-text-primary, #ffffff);
+  font-family: var(--cad-font-mono, monospace);
+  font-weight: 500;
+}
+
+.summary-domain {
+  color: var(--cad-accent-cyan-light, #38bdf8);
+}
+
+.inspector-hint-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.hint-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--cad-text-secondary, #94a3af);
+}
+
+.hint-bullet {
+  color: var(--cad-accent-cyan-light, #38bdf8);
+  font-size: 0.85rem;
+}
+
+/* Docked Component Info Panel Adaptation */
+.dock-inspector-wrapper {
+  width: 100%;
+  height: 100%;
+}
+
+.dock-inspector-wrapper .component-info-panel {
+  position: static;
+  width: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  box-shadow: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  animation: none;
+  padding: 0;
+}
+
+/* 4. Central 3D Viewport */
+.cad-viewport-center {
+  flex: 1;
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 45%, #111a2e 0%, #080c14 75%);
+}
+
+.viewport-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 5. Bottom Status / Telemetry Bar (32px) */
+.workspace-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 16px;
+  background: rgba(8, 12, 20, 0.95);
+  border-top: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  font-size: 0.72rem;
+  z-index: 50;
+  user-select: none;
+}
+
+.status-modality {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cad-text-secondary, #94a3af);
+  font-weight: 500;
+}
+
+.modality-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--cad-text-muted, #64748b);
+}
+
+.modality-dot.gesture {
+  background-color: var(--cad-accent-cyan-light, #38bdf8);
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.8);
+}
+
+.modality-dot.mouse {
+  background-color: var(--cad-accent-amber, #f59e0b);
+}
+
+.status-gesture-hints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cad-text-muted, #64748b);
+  font-size: 0.72rem;
+}
+
+.status-gesture-hints .hint-item strong {
+  color: var(--cad-accent-cyan-light, #38bdf8);
+}
+
+.status-gesture-hints .hint-sep {
+  color: rgba(255, 255, 255, 0.15);
+}
+
+.status-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cad-text-muted, #64748b);
+  font-size: 0.72rem;
+}
+
+.meta-sep {
+  color: rgba(255, 255, 255, 0.15);
+}
+
+/* Roadmap Drawer Slide-over */
+.roadmap-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  max-width: 100%;
+  background: rgba(15, 23, 42, 0.95);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-left: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.12));
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.6);
+  animation: slideInRight 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.roadmap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.roadmap-header h2 {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin: 0;
+}
+
+.roadmap-header .close-btn {
+  background: transparent;
+  border: none;
+  color: var(--cad-text-muted, #64748b);
+  cursor: pointer;
+  padding: 4px;
+  font-size: 0.9rem;
+  border-radius: 4px;
+}
+
+.roadmap-header .close-btn:hover {
+  color: #ffffff;
+}
+
+.roadmap-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.roadmap-card {
+  padding: 10px 12px;
+  background: rgba(8, 12, 20, 0.6);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.roadmap-card .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.roadmap-card .card-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.roadmap-card .card-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.roadmap-card .card-badge.active {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+
+.roadmap-card .card-phase {
+  font-size: 0.68rem;
+  color: var(--cad-accent-cyan-light, #38bdf8);
+}
+
+.roadmap-card .card-desc {
+  font-size: 0.72rem;
+  color: var(--cad-text-secondary, #94a3af);
+  line-height: 1.4;
+  margin: 0;
+}
+
+/* 6. Responsive Breakpoints */
+@media (max-width: 1024px) {
+  .cad-dock {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    height: 100%;
+    z-index: 40;
+    box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+  }
+
+  .cad-dock-left {
+    left: 0;
+  }
+
+  .cad-dock-right {
+    right: 0;
+  }
+
+  .cad-dock-left.collapsed {
+    transform: translateX(-100%);
+    width: 280px;
+  }
+
+  .cad-dock-right.collapsed {
+    transform: translateX(100%);
+    width: 320px;
+  }
+
+  .top-bar-branding .breadcrumb-subsystem,
+  .top-bar-branding .breadcrumb-separator:nth-of-type(2) {
+    display: none;
+  }
+
+  .status-gesture-hints {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .workspace-top-bar {
+    padding: 0 8px;
+  }
+
+  .top-bar-telemetry .telemetry-pill,
+  .top-bar-telemetry .telemetry-gesture-badge {
+    display: none;
+  }
+
+  .btn-label {
+    display: none;
+  }
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  .cad-dock,
+  .toolbar-btn,
+  .camera-pill.requesting .cam-indicator {
+    transition: none !important;
+    animation: none !important;
+    transform: none !important;
+  }
+}

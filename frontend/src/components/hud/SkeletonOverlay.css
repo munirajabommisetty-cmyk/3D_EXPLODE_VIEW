@@ -1,0 +1,97 @@
+/* Skeleton Overlay Styling */
+.skeleton-overlay-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Mirrored canvas matching the mirrored video stream */
+.pip-skeleton-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transform: scaleX(-1);
+  -webkit-transform: scaleX(-1);
+}
+
+/* Non-mirrored telemetry badge positioned at the bottom right of video viewport */
+.skeleton-telemetry-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  background: rgba(11, 15, 25, 0.75);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  font-family: monospace, var(--font-mono, monospace);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #e5e7eb;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.telemetry-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.telemetry-item.init {
+  color: #38bdf8;
+}
+
+.telemetry-item.tracking {
+  color: #34d399;
+}
+
+.telemetry-item.ready {
+  color: #9ca3af;
+}
+
+.telemetry-item.fps {
+  color: #67e8f9;
+}
+
+.telemetry-divider {
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.telemetry-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.telemetry-dot.active {
+  background-color: #10b981;
+  box-shadow: 0 0 6px #10b981;
+}
+
+.telemetry-dot.ready {
+  background-color: #6b7280;
+}
+
+.telemetry-spinner {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid rgba(56, 189, 248, 0.3);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: telemetry-spin 1s infinite linear;
+}
+
+@keyframes telemetry-spin {
+  to { transform: rotate(360deg); }
+}

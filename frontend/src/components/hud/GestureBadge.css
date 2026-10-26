@@ -1,0 +1,124 @@
+/* Gesture HUD Badge Styling */
+.gesture-hud-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: rgba(11, 15, 25, 0.82);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  font-family: monospace, var(--font-mono, monospace);
+  color: #f3f4f6;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.gesture-hud-badge.compact {
+  padding: 3px 8px;
+  gap: 6px;
+  font-size: 0.72rem;
+}
+
+/* Color states per gesture */
+.gesture-hud-badge.open_palm {
+  border-color: rgba(16, 185, 129, 0.6);
+  background: rgba(16, 185, 129, 0.12);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+}
+
+.gesture-hud-badge.open_palm .gesture-name {
+  color: #34d399;
+}
+
+.gesture-hud-badge.pointing {
+  border-color: rgba(6, 182, 212, 0.6);
+  background: rgba(6, 182, 212, 0.12);
+  box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+}
+
+.gesture-hud-badge.pointing .gesture-name {
+  color: #22d3ee;
+}
+
+.gesture-hud-badge.pinch {
+  border-color: rgba(245, 158, 11, 0.6);
+  background: rgba(245, 158, 11, 0.12);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+}
+
+.gesture-hud-badge.pinch .gesture-name {
+  color: #fbbf24;
+}
+
+.gesture-hud-badge.none {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.gesture-hud-badge.none .gesture-name {
+  color: #9ca3af;
+}
+
+.gesture-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.gesture-hud-badge.compact .gesture-icon {
+  font-size: 0.9rem;
+}
+
+.gesture-details {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.gesture-name {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.gesture-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.62rem;
+  color: #9ca3af;
+}
+
+.gesture-confidence {
+  font-weight: 600;
+  color: #e5e7eb;
+}
+
+.gesture-stability-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+
+.gesture-stability-dot.active {
+  background-color: #10b981;
+  box-shadow: 0 0 4px #10b981;
+}
+
+.gesture-stability-dot.pending {
+  background-color: #f59e0b;
+}
+
+.gesture-stability-text {
+  letter-spacing: 0.02em;
+}
+
+.gesture-settling-text {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.gesture-idle-text {
+  color: #6b7280;
+}

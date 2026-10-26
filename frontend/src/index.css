@@ -1,0 +1,115 @@
+/* =========================================================================
+   Design System & Theme: GestureLab CAD 3D Engineering Platform
+   Clean, Modern, Accessible Dark Technical Theme
+   ========================================================================= */
+
+:root {
+  /* Color Palette - Neutral Foundations */
+  --cad-bg-app: #080c14;
+  --cad-bg-surface: #0f172a;
+  --cad-bg-elevated: #1e293b;
+  --cad-bg-glass: rgba(15, 23, 42, 0.88);
+  --cad-bg-overlay: rgba(8, 12, 20, 0.75);
+
+  /* Border Tokens */
+  --cad-border-subtle: rgba(255, 255, 255, 0.08);
+  --cad-border-medium: rgba(255, 255, 255, 0.16);
+  --cad-border-focus: #38bdf8;
+  --cad-border-accent: rgba(56, 189, 248, 0.4);
+
+  /* Typography Colors */
+  --cad-text-primary: #f8fafc;
+  --cad-text-secondary: #94a3b8;
+  --cad-text-muted: #64748b;
+  --cad-text-inverse: #0f172a;
+
+  /* Domain & Interaction Accents */
+  --cad-accent-cyan: #0ea5e9;
+  --cad-accent-cyan-light: #38bdf8;
+  --cad-accent-cyan-glow: rgba(56, 189, 248, 0.18);
+  --cad-accent-amber: #f59e0b;
+  --cad-accent-amber-glow: rgba(245, 158, 11, 0.2);
+  --cad-accent-rose: #ec4899;
+  --cad-accent-green: #10b981;
+  --cad-accent-red: #ef4444;
+
+  /* Backward Compatibility Aliases */
+  --bg-primary: var(--cad-bg-app);
+  --bg-secondary: var(--cad-bg-surface);
+  --bg-card: var(--cad-bg-glass);
+  --border-subtle: var(--cad-border-subtle);
+  --border-accent: var(--cad-border-accent);
+  --text-primary: var(--cad-text-primary);
+  --text-secondary: var(--cad-text-secondary);
+  --text-muted: var(--cad-text-muted);
+  --accent-cyan: var(--cad-accent-cyan);
+  --accent-amber: var(--cad-accent-amber);
+
+  /* Font Stacks */
+  --cad-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --cad-font-mono: 'JetBrains Mono', 'SF Mono', Consolas, Menlo, monospace;
+  --font-family: var(--cad-font-sans);
+
+  /* Elevation Shadows */
+  --cad-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --cad-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.4);
+  --cad-shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--cad-bg-app);
+  color: var(--cad-text-primary);
+  font-family: var(--cad-font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+#root {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Standardized Accessible CAD Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(11, 15, 25, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cad-accent-cyan-light);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) rgba(11, 15, 25, 0.5);
+}
+
+/* Accessible focus ring utility */
+:focus-visible {
+  outline: 2px solid var(--cad-border-focus);
+  outline-offset: 2px;
+}

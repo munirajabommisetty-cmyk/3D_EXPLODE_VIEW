@@ -1,0 +1,298 @@
+/**
+ * Guided Learning Panel Styles
+ * Phase 9 - Task 9.9: Exploded View & Guided Learning
+ */
+
+.guided-learning-panel {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 90%;
+  max-width: 620px;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.15);
+  color: #f1f5f9;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: slideUpLesson 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideUpLesson {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* Header */
+.lesson-header {
+  padding: 12px 16px 10px;
+  background: rgba(30, 41, 59, 0.7);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lesson-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lesson-meta-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-discipline-pill {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.lesson-step-pill {
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+}
+
+.lesson-close-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: all 0.15s ease;
+}
+
+.lesson-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f87171;
+}
+
+.lesson-title-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lesson-main-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+/* Progress Track */
+.lesson-progress-track {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.lesson-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0284c7, #38bdf8);
+  transition: width 0.3s ease;
+}
+
+/* Body */
+.lesson-body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.step-component-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.step-target-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: #38bdf8;
+  margin: 0;
+}
+
+.step-component-id-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: #64748b;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.step-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+  margin: 0;
+}
+
+.step-description {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #cbd5e1;
+  margin: 0;
+}
+
+/* Educational Notes */
+.step-notes-box {
+  background: rgba(30, 41, 59, 0.5);
+  border-left: 3px solid #38bdf8;
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+}
+
+.step-notes-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.step-notes-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.step-note-item {
+  font-size: 12px;
+  color: #e2e8f0;
+  line-height: 1.4;
+}
+
+/* Footer & Navigation */
+.lesson-footer {
+  padding: 10px 16px;
+  background: rgba(15, 23, 42, 0.85);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.lesson-step-indicators {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.step-dot:hover {
+  background: rgba(56, 189, 248, 0.6);
+  transform: scale(1.2);
+}
+
+.step-dot.active {
+  background: #38bdf8;
+  transform: scale(1.3);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.6);
+}
+
+.step-dot.completed {
+  background: rgba(56, 189, 248, 0.45);
+}
+
+.lesson-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lesson-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lesson-nav-btn:hover:not(:disabled) {
+  background: rgba(51, 65, 85, 0.9);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #fff;
+}
+
+.lesson-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.lesson-nav-btn.primary {
+  background: #0284c7;
+  border-color: #38bdf8;
+  color: #fff;
+}
+
+.lesson-nav-btn.primary:hover {
+  background: #0369a1;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guided-learning-panel {
+    animation: none;
+  }
+  .lesson-progress-fill,
+  .step-dot,
+  .lesson-nav-btn {
+    transition: none;
+  }
+}

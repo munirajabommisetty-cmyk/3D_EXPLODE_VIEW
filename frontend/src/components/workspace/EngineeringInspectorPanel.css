@@ -1,0 +1,392 @@
+/**
+ * General-Purpose Engineering Inspector Panel Styling
+ * Phase 9 - Task 9.6
+ */
+
+.engineering-inspector-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--cad-text-primary, #f9fafb);
+  background: transparent;
+  font-size: 0.8rem;
+  user-select: none;
+}
+
+/* 1. Inspector Header */
+.inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: rgba(30, 41, 59, 0.35);
+  border-bottom: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.header-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.header-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.domain-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.domain-pill.mechanical {
+  background: rgba(6, 182, 212, 0.15);
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  color: var(--cad-accent-cyan, #06b6d4);
+}
+
+.domain-pill.civil {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: var(--cad-accent-amber, #f59e0b);
+}
+
+.id-badge {
+  font-family: var(--cad-font-mono, monospace);
+  font-size: 0.68rem;
+  color: var(--cad-text-muted, #6b7280);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.component-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #ffffff;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.component-subtitle {
+  font-size: 0.74rem;
+  color: var(--cad-text-secondary, #9ca3af);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inspector-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--cad-text-muted, #6b7280);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.inspector-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.inspector-close-btn:focus-visible {
+  outline: 2px solid var(--cad-accent-cyan, #06b6d4);
+}
+
+/* 2. Tab Navigation Bar */
+.inspector-tablist {
+  display: flex;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.6);
+  border-bottom: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 8px 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--cad-text-secondary, #9ca3af);
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.tab-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tab-btn:focus-visible {
+  outline: 2px solid var(--cad-accent-cyan, #06b6d4);
+  outline-offset: -2px;
+}
+
+.tab-btn.active {
+  color: var(--cad-accent-cyan, #06b6d4);
+  border-bottom-color: var(--cad-accent-cyan, #06b6d4);
+  font-weight: 600;
+}
+
+/* 3. Tab Content Area */
+.inspector-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: tabFadeIn 0.18s ease;
+}
+
+@keyframes tabFadeIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 4. Inspector Card */
+.inspector-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+}
+
+.card-header-with-badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card-section-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--cad-text-secondary, #9ca3af);
+  margin: 0;
+}
+
+.edu-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: var(--cad-accent-amber, #f59e0b);
+}
+
+.description-text {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--cad-text-primary, #f9fafb);
+  margin: 0;
+}
+
+/* 5. Metadata Table & Rows */
+.metadata-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metadata-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 0.75rem;
+}
+
+.metadata-row:last-child {
+  border-bottom: none;
+}
+
+.metadata-label {
+  color: var(--cad-text-muted, #6b7280);
+}
+
+.metadata-value {
+  color: var(--cad-text-primary, #f9fafb);
+  font-family: var(--cad-font-mono, monospace);
+  font-weight: 500;
+  text-align: right;
+  word-break: break-word;
+}
+
+/* 6. Notes List */
+.notes-list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note-item {
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--cad-text-secondary, #9ca3af);
+}
+
+/* 7. Empty & Alert States */
+.inspector-empty-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px 14px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px dashed var(--cad-border-medium, rgba(255, 255, 255, 0.16));
+  border-radius: 8px;
+  margin: 12px;
+  gap: 8px;
+}
+
+.empty-badge {
+  padding: 2px 8px;
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  border-radius: 4px;
+  color: var(--cad-accent-cyan, #06b6d4);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.empty-icon {
+  font-size: 1.8rem;
+  margin: 4px 0;
+}
+
+.empty-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 0;
+}
+
+.empty-description {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--cad-text-secondary, #9ca3af);
+  margin: 0;
+}
+
+.empty-hint-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--cad-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.hint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.73rem;
+  color: var(--cad-text-secondary, #9ca3af);
+}
+
+.hint-bullet {
+  color: var(--cad-accent-cyan, #06b6d4);
+  font-size: 0.82rem;
+}
+
+.tab-empty-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 20px 12px;
+  background: rgba(15, 23, 42, 0.35);
+  border: 1px dashed var(--cad-border-subtle, rgba(255, 255, 255, 0.1));
+  border-radius: 6px;
+  gap: 6px;
+}
+
+.tab-empty-icon {
+  font-size: 1.5rem;
+  margin-bottom: 2px;
+}
+
+.tab-empty-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--cad-text-primary, #f9fafb);
+  margin: 0;
+}
+
+.tab-empty-text {
+  font-size: 0.73rem;
+  color: var(--cad-text-muted, #6b7280);
+  line-height: 1.4;
+  margin: 0;
+}
+
+.inspector-alert-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  color: #f87171;
+  font-size: 0.78rem;
+}
+
+.alert-icon {
+  font-size: 1.1rem;
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  .tab-panel {
+    animation: none !important;
+  }
+}

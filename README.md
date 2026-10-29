@@ -4,6 +4,7 @@ An interactive engineering-education web app. Learners explore real machines, st
 
 ---
 
+
 ## 🧩 The Problem
 
 Engineering and science students learn how machines and structures work mostly from **flat textbook diagrams and static slides**. That creates real gaps:
@@ -13,6 +14,8 @@ Engineering and science students learn how machines and structures work mostly f
 - **CAD tools are built for designers, not learners.** Professional CAD software is costly, complex and explains nothing about *why* a part exists.
 - **Questions go unanswered.** Outside the classroom there is no one to ask "why is this part needed?" or "what happens if it fails?", and help in a student's own language is rare.
 - **Mouse-and-keyboard only.** Demonstrating a model in a classroom, lab or exhibition means standing at a computer instead of interacting naturally.
+
+- 
 
 ## 💡 Our Solution
 
@@ -29,6 +32,7 @@ GestureLab turns the browser into a **hands-on 3D engineering lab with a built-i
 | Cost and access | Runs in a normal web browser. Hand tracking runs **locally in the browser**, so video never leaves the device. |
 
 ---
+
 
 ## 🎯 Major Use Cases
 
@@ -55,6 +59,7 @@ Schools and colleges without physical cut-away models can give every student the
 
 ---
 
+
 ## 🧱 Learning Modules
 
 | Module | Field | What you can explore |
@@ -66,6 +71,7 @@ Schools and colleges without physical cut-away models can give every student the
 | **Human Eye Explorer** | Anatomy | Real eye structures, with a cutaway to see inside. |
 
 ---
+
 
 ## ✨ Key Features
 
@@ -84,6 +90,7 @@ Schools and colleges without physical cut-away models can give every student the
 
 ---
 
+
 ## ⚙️ How It Works
 
 ```
@@ -93,6 +100,7 @@ Microphone ──► FastAPI backend ──► speech-to-text ──► command 
                                      │
                                      └──► LLM teaching plan ──► step-by-step explanation + text-to-speech
 ```
+
 
 | Layer | Technology |
 | :--- | :--- |

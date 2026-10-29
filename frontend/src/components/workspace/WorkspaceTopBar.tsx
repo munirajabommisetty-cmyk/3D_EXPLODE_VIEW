@@ -1,5 +1,6 @@
 import React from 'react';
 import { GestureBadge } from '../hud/GestureBadge';
+import { Icon } from '../ui/Icon';
 import type { GestureRecognitionResult } from '../../types/gestures';
 import type { CameraStatus } from '../../hooks/useCamera';
 import './WorkspaceLayout.css';
@@ -8,7 +9,7 @@ export interface WorkspaceTopBarProps {
   /** Name of the currently loaded model */
   modelName: string;
   /** Engineering domain for the model */
-  domain?: 'mechanical' | 'civil';
+  domain?: 'mechanical' | 'civil' | 'medical';
   /** Optional subsystem or category breadcrumb */
   subsystem?: string;
   /** Whether the left assembly hierarchy dock is open */
@@ -45,6 +46,12 @@ export interface WorkspaceTopBarProps {
   isGuidedTourActive?: boolean;
   /** Toggle callback for guided tour */
   onToggleGuidedTour?: () => void;
+  /** Reassemble the exploded model (sends assembly.restore through the command dispatcher). */
+  onReassemble?: () => void;
+  /** Open the "More" menu initially (tests and stories). */
+  defaultMenuOpen?: boolean;
+  /** Show development-only items (project roadmap). Defaults to development builds. */
+  showDevTools?: boolean;
 }
 
 /**
@@ -56,223 +63,99 @@ export const WorkspaceTopBar: React.FC<WorkspaceTopBarProps> = ({
   modelName,
   domain = 'mechanical',
   subsystem = 'Powertrain',
-  isLeftDockOpen,
-  onToggleLeftDock,
   isRightDockOpen,
   onToggleRightDock,
-  renderFps,
   cameraStatus,
   activeGesture,
-  showDiagnostics,
-  onToggleDiagnostics,
-  showRoadmap,
-  onToggleRoadmap,
-  onResetView,
   onNavigateHome,
   explodedFactor = 0,
-  onExplodedFactorChange,
-  isGuidedTourActive = false,
-  onToggleGuidedTour,
+  onReassemble,
 }) => {
+  const gestureLive = cameraStatus === 'active' && activeGesture && activeGesture.gesture !== 'NONE';
+  const mode = cameraStatus === 'active'
+    ? { key: 'camera', icon: 'camera' as const, text: 'Camera on', hint: 'Hand tracking is on: show your hand to use gestures' }
+    : { key: 'mouse', icon: 'mouse' as const, text: 'Mouse & voice', hint: 'Camera off: use the mouse, keyboard and voice' };
+
+  // Learner-facing bar: where you are, how you are interacting, the assembly state and part
+  // information. The parts tree ( [ ), guided lesson ( L ), gesture diagnostics ( D ) and every
+  // voice command still work as before.
   return (
-    <header className="workspace-top-bar" aria-label="CAD Workspace Toolbar">
-      {/* Brand Identity & Breadcrumbs */}
+    <header className="workspace-top-bar" aria-label="Explorer toolbar">
       <div className="top-bar-branding">
-        <div className="brand-badge">
-          <span className="brand-icon" aria-hidden="true">
-            ⚙️
-          </span>
-          <span className="brand-name">GestureLab CAD</span>
-        </div>
-
-        <span className="breadcrumb-separator" aria-hidden="true">
-          /
-        </span>
-
-        <nav className="workspace-breadcrumbs" aria-label="Breadcrumb Navigation">
+        {onNavigateHome ? (
+          <button
+            type="button"
+            className="toolbar-btn catalogue-btn"
+            onClick={onNavigateHome}
+            title="Back to all models"
+            aria-label="Back to all models"
+          >
+            <Icon name="arrowLeft" />
+            <span className="btn-label">All models</span>
+          </button>
+        ) : (
+          <div className="brand-badge"><span className="brand-name">GestureLab</span></div>
+        )}
+        <span className="top-bar-sep" aria-hidden="true" />
+        <nav className="workspace-breadcrumbs" aria-label="Current model">
           <span className={`domain-tag ${domain}`}>
-            {domain === 'mechanical' ? 'Mechanical' : 'Civil'}
+            {domain === 'mechanical' ? 'Mechanical' : domain === 'medical' ? 'Anatomy' : 'Civil'}
           </span>
-          <span className="breadcrumb-separator" aria-hidden="true">
-            &gt;
-          </span>
-          <span className="breadcrumb-subsystem">{subsystem}</span>
-          <span className="breadcrumb-separator" aria-hidden="true">
-            &gt;
-          </span>
-          <span className="breadcrumb-model" title={modelName}>
+          <span className="breadcrumb-model" title={`${modelName} — ${subsystem}`}>
             {modelName}
           </span>
         </nav>
       </div>
 
-      {/* Primary Workspace Action Controls */}
       <div className="top-bar-controls">
-        {/* Navigate to Catalogue Dashboard */}
-        {onNavigateHome && (
-          <button
-            type="button"
-            className="toolbar-btn catalogue-btn"
-            onClick={onNavigateHome}
-            title="Return to Engineering Explorer Catalogue Dashboard"
-            aria-label="Return to Engineering Explorer Catalogue Dashboard"
-          >
-            <span className="btn-icon" aria-hidden="true">
-              🏠
+        {/* Interaction mode: live gesture (with real confidence) when one is recognised */}
+        <div className="top-bar-telemetry">
+          {gestureLive ? (
+            <div className="telemetry-gesture-badge">
+              <GestureBadge gestureResult={activeGesture} compact />
+            </div>
+          ) : (
+            <span className={`mode-chip mode-${mode.key}`} role="status" title={mode.hint} aria-label={`Interaction mode: ${mode.hint}`}>
+              <Icon name={mode.icon} size={14} />
+              <span className="btn-label">{mode.text}</span>
             </span>
-            <span className="btn-label">Catalogue</span>
-          </button>
-        )}
-
-        {/* Toggle Left Dock (Assembly Tree) */}
-        <button
-          type="button"
-          className={`toolbar-btn ${isLeftDockOpen ? 'active' : ''}`}
-          onClick={onToggleLeftDock}
-          title={isLeftDockOpen ? 'Collapse Assembly Tree (Key: [)' : 'Expand Assembly Tree (Key: [)'}
-          aria-label={isLeftDockOpen ? 'Collapse Assembly Hierarchy Dock' : 'Expand Assembly Hierarchy Dock'}
-          aria-expanded={isLeftDockOpen}
-        >
-          <span className="btn-icon" aria-hidden="true">
-            {isLeftDockOpen ? '◀' : '▶'}
-          </span>
-          <span className="btn-label">Assembly</span>
-        </button>
-
-        {/* Reset Camera View Button (if handler provided) */}
-        {onResetView && (
-          <button
-            type="button"
-            className="toolbar-btn"
-            onClick={onResetView}
-            title="Reset camera viewpoint to isometric preset [Key: R]"
-            aria-label="Reset Camera View"
-          >
-            <span className="btn-icon" aria-hidden="true">
-              ⟲
-            </span>
-            <span className="btn-label">Reset View</span>
-          </button>
-        )}
-
-        {/* Guided Tour / Learn Button */}
-        {onToggleGuidedTour && (
-          <button
-            type="button"
-            className={`toolbar-btn ${isGuidedTourActive ? 'active' : ''}`}
-            onClick={onToggleGuidedTour}
-            title={isGuidedTourActive ? 'Exit Guided Tour [Esc]' : 'Start Interactive Guided Tour [Key: L]'}
-            aria-label={isGuidedTourActive ? 'Exit Guided Tour' : 'Start Interactive Guided Tour'}
-          >
-            <span className="btn-icon" aria-hidden="true">
-              🎓
-            </span>
-            <span className="btn-label">{isGuidedTourActive ? 'Exit Tour' : 'Guided Tour'}</span>
-          </button>
-        )}
-
-        {/* Exploded View Toggle Button */}
-        {onExplodedFactorChange && (
-          <button
-            type="button"
-            className={`toolbar-btn ${explodedFactor > 0 ? 'active' : ''}`}
-            onClick={() => onExplodedFactorChange(explodedFactor > 0 ? 0 : 0.6)}
-            title={
-              explodedFactor > 0
-                ? 'Assemble Model to 0% [Key: X]'
-                : 'Explode Model Components [Key: X]'
-            }
-            aria-label={
-              explodedFactor > 0 ? 'Assemble Model' : 'Explode Model Components'
-            }
-          >
-            <span className="btn-icon" aria-hidden="true">
-              💥
-            </span>
-            <span className="btn-label">
-              {explodedFactor > 0 ? `Exploded (${Math.round(explodedFactor * 100)}%)` : 'Exploded'}
-            </span>
-          </button>
-        )}
-
-        {/* Toggle Diagnostics Panel */}
-        <button
-          type="button"
-          className={`toolbar-btn ${showDiagnostics ? 'active' : ''}`}
-          onClick={onToggleDiagnostics}
-          title="Toggle Gesture Diagnostics Panel [Key: D]"
-          aria-label="Toggle Gesture Diagnostics Panel"
-          aria-expanded={showDiagnostics}
-        >
-          <span className="btn-icon" aria-hidden="true">
-            📊
-          </span>
-          <span className="btn-label">Diagnostics</span>
-        </button>
-
-        {/* Toggle Roadmap Drawer */}
-        <button
-          type="button"
-          className={`toolbar-btn ${showRoadmap ? 'active' : ''}`}
-          onClick={onToggleRoadmap}
-          title="Toggle Project Roadmap Panel"
-          aria-label="Toggle Project Roadmap Panel"
-          aria-expanded={showRoadmap}
-        >
-          <span className="btn-icon" aria-hidden="true">
-            🗺️
-          </span>
-          <span className="btn-label">Roadmap</span>
-        </button>
-
-        {/* Toggle Right Dock (Inspector) */}
-        <button
-          type="button"
-          className={`toolbar-btn ${isRightDockOpen ? 'active' : ''}`}
-          onClick={onToggleRightDock}
-          title={isRightDockOpen ? 'Collapse Inspector (Key: ])' : 'Expand Inspector (Key: ])'}
-          aria-label={isRightDockOpen ? 'Collapse Engineering Inspector Dock' : 'Expand Engineering Inspector Dock'}
-          aria-expanded={isRightDockOpen}
-        >
-          <span className="btn-label">Inspector</span>
-          <span className="btn-icon" aria-hidden="true">
-            {isRightDockOpen ? '▶' : '◀'}
-          </span>
-        </button>
-      </div>
-
-      {/* Live System Telemetry Indicators */}
-      <div className="top-bar-telemetry">
-        {/* Render FPS Pill */}
-        <div className="telemetry-pill" title="Live WebGL Render Frame Rate">
-          <span className="telemetry-dot" aria-hidden="true" />
-          <span className="telemetry-label">Render:</span>
-          <span className="telemetry-value">{renderFps} FPS</span>
+          )}
         </div>
 
-        {/* Camera Service Status Pill */}
-        <div className={`camera-pill ${cameraStatus}`} title={`Webcam tracking status: ${cameraStatus}`}>
-          <span className={`cam-indicator ${cameraStatus}`} aria-hidden="true" />
-          <span className="camera-label">
-            {cameraStatus === 'active'
-              ? 'Camera: Live'
-              : cameraStatus === 'requesting'
-              ? 'Camera: Connecting...'
-              : cameraStatus === 'denied'
-              ? 'Camera: Denied'
-              : cameraStatus === 'not_found'
-              ? 'Camera: None'
-              : 'Camera: Off'}
-          </span>
-        </div>
-
-        {/* Compact Gesture Badge (when camera is live and gesture active) */}
-        {cameraStatus === 'active' && activeGesture && (
-          <div className="telemetry-gesture-badge">
-            <GestureBadge gestureResult={activeGesture} compact />
+        {explodedFactor > 0 && (
+          <div className="exploded-state" role="status">
+            <span className="exploded-state-label">
+              <Icon name="explode" size={14} />
+              <span className="btn-label">Exploded view</span>
+            </span>
+            {onReassemble && (
+              <button
+                type="button"
+                className="toolbar-btn reassemble-btn"
+                onClick={onReassemble}
+                aria-label="Reassemble the model"
+                title="Put the parts back together (X, voice “put it back together”, or pinch both hands)"
+              >
+                <Icon name="collapse" size={14} />
+                <span className="btn-label">Reassemble</span>
+              </button>
+            )}
           </div>
         )}
+        <button
+          type="button"
+          className={`toolbar-btn info-btn ${isRightDockOpen ? 'active' : ''}`}
+          onClick={onToggleRightDock}
+          aria-pressed={isRightDockOpen}
+          aria-label={isRightDockOpen ? 'Hide part information' : 'Show part information'}
+          title={isRightDockOpen ? 'Hide part information ( ] )' : 'Show part information ( ] )'}
+        >
+          <Icon name="panel" />
+          <span className="btn-label">Part info</span>
+        </button>
       </div>
     </header>
   );
 };
+
+export default WorkspaceTopBar;

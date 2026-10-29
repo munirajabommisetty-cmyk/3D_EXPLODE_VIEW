@@ -60,16 +60,20 @@ describe('CSS & Scroll Architecture (Task 10.1)', () => {
     });
   });
 
-  describe('2. Explorer/Dashboard Layout Scrolling (HomeDashboard.css)', () => {
-    it('configures .engineering-dashboard with min-height: 100vh and horizontal containment', () => {
-      assert.ok(dashboardCss.includes('.engineering-dashboard {'));
-      assert.ok(dashboardCss.includes('min-height: 100vh'));
-      assert.ok(dashboardCss.includes('overflow-x: hidden'));
+  describe('2. Catalogue layout (HomeDashboard.css)', () => {
+    it('the page scrolls normally and the grid becomes one column on narrow screens', () => {
+      assert.ok(dashboardCss.includes('.catalogue {'));
+      assert.match(dashboardCss, /@media \(max-width: 860px\) \{\s*\.catalogue-grid \{ grid-template-columns: 1fr; \}/);
     });
 
-    it('ensures model-cards-grid shifts to 1fr on mobile screens <= 640px to prevent horizontal clipping', () => {
-      assert.ok(dashboardCss.includes('@media (max-width: 640px)'));
-      assert.ok(dashboardCss.includes('grid-template-columns: 1fr;'));
+    it('keeps the 3D preview out of the card height calculation (no canvas-driven growth)', () => {
+      // Regression: a WebGL canvas's intrinsic size must never set the card height
+      assert.match(dashboardCss, /\.catalogue-preview \{[^}]*aspect-ratio:\s*16 \/ 9/);
+      assert.match(dashboardCss, /\.catalogue-preview \.model-preview-container \{[^}]*position:\s*absolute;[^}]*inset:\s*0/);
+    });
+
+    it('domain tabs scroll sideways instead of overflowing on small screens', () => {
+      assert.match(dashboardCss, /\.catalogue-tabs \{[^}]*overflow-x:\s*auto/);
     });
   });
 

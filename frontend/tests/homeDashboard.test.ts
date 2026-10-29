@@ -66,257 +66,97 @@ const MOCK_CIVIL_MODEL: EngineeringModelDefinition = {
   }),
 };
 
-describe('HomeDashboard — Catalogue & Featured Model Rendering', () => {
-  it('renders branding, app title, and tagline in header', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        onLaunchModel: () => {},
-      })
-    );
+const render = (props: Record<string, unknown> = {}) =>
+  renderToStaticMarkup(React.createElement(HomeDashboard, { onLaunchModel: () => {}, ...props }));
 
-    assert.ok(html.includes('GestureLab CAD'), 'Expected brand tagline');
-    assert.ok(html.includes('Engineering Explorer'), 'Expected app title');
-    assert.ok(
-      html.includes('Interactive 3D spatial exploration'),
-      'Expected descriptive subtitle'
-    );
+describe('Model catalogue — cards', () => {
+  it('lists every catalogue model with its correct domain, level, description and an open action', () => {
+    const html = render();
+    assert.ok(html.includes('Model catalogue'), 'page title');
+    for (const m of modelRegistry.getCatalogueModels()) {
+      assert.ok(html.includes(m.name), m.name);
+      assert.ok(html.includes(`aria-label="Open ${m.name}"`), `${m.name}: preview opens the model`);
+    }
+    assert.ok(html.includes('data-domain="medical">Anatomy</span>'), 'the eye is labelled Anatomy (not Civil)');
+    assert.ok(html.includes('data-domain="mechanical">Mechanical</span>'));
+    assert.ok(html.includes('data-domain="civil">Civil</span>'));
+    assert.ok((html.match(/Open in 3D/g) ?? []).length === modelRegistry.getCatalogueModels().length);
   });
 
-  it('renders registered planetary gearbox in featured model spotlight', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('Featured Spotlight'), 'Expected featured spotlight badge');
-    assert.ok(html.includes('Epicyclic Planetary Gearbox'), 'Expected featured model name');
-    assert.ok(html.includes('Transmission &amp; Kinematics') || html.includes('Transmission & Kinematics'), 'Expected category');
-    assert.ok(html.includes('Intermediate'), 'Expected difficulty badge');
-    assert.ok(html.includes('7 Components'), 'Expected component count');
-    assert.ok(html.includes('Launch 3D Workspace'), 'Expected launch CTA button');
+  it('"what you can explore" comes from each model, never another model’s text', () => {
+    const html = render();
+    assert.ok(!html.includes('bridge truss physics'), 'no copied bridge text on other cards');
+    const eye = modelRegistry.getCatalogueModels().find((m) => m.domain === 'medical')!;
+    assert.ok(html.includes(`${eye.componentCount} parts to inspect`));
+    assert.ok(!html.includes('🧠'), 'no leftover brain placeholder');
   });
 
-  it('renders model catalogue card with domain badges, component count, and tags', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('Engineering Model Catalogue'), 'Expected catalogue section title');
-    assert.ok(html.includes('⚙️ Mechanical'), 'Expected mechanical domain pill');
-    assert.ok(html.includes('#Gearbox'), 'Expected model tag');
-    assert.ok(html.includes('Open in Workspace'), 'Expected card action button');
+  it('renders a civil model card from a supplied list', () => {
+    const html = render({ models: [MOCK_CIVIL_MODEL] });
+    assert.ok(html.includes('Warren Truss Bridge Assembly'));
+    assert.ok(html.includes('18 parts to inspect'));
+    assert.ok(html.includes('Beginner'));
   });
 });
 
-describe('HomeDashboard — Domain Filtering', () => {
-  it('renders domain counts accurately from registered models', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('All Domains'), 'Expected All Domains tab');
-    assert.ok(html.includes('Mechanical'), 'Expected Mechanical tab');
-    assert.ok(html.includes('Civil'), 'Expected Civil tab');
+describe('Model catalogue — filtering, search and empty states', () => {
+  it('domain tabs show live counts, with Anatomy for medical models', () => {
+    const html = render();
+    const counts = getDomainCounts(modelRegistry.getCatalogueModels());
+    for (const [label, n] of [['All models', counts.all], ['Mechanical', counts.mechanical], ['Civil', counts.civil], ['Anatomy', counts.medical]] as const) {
+      assert.match(html, new RegExp(`${label}<span class="catalogue-count">${n}</span>`), label);
+    }
   });
 
-  it('displays honest empty state when Civil domain has zero registered models', () => {
-    const gearbox = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID)!;
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        models: [gearbox],
-        initialDomain: 'civil',
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(
-      html.includes('No Civil Models Registered Yet'),
-      'Expected honest civil empty state heading'
-    );
-    assert.ok(
-      html.includes('Civil engineering structural models (including the Warren Truss Bridge'),
-      'Expected civil models upcoming release notice'
-    );
-    assert.ok(
-      html.includes('View Available Mechanical Models'),
-      'Expected button to switch to available models'
-    );
+  it('an empty domain says so plainly and offers a way back', () => {
+    const html = render({ models: [modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID)!], initialDomain: 'civil' });
+    assert.ok(html.includes('No matching models'));
+    assert.ok(html.includes('There are no Civil models yet.'));
+    assert.ok(html.includes('Show all models'));
   });
 
-  it('renders civil model card when a civil model is provided in the catalogue', () => {
-    const gearbox = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID)!;
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        models: [gearbox, MOCK_CIVIL_MODEL],
-        initialDomain: 'civil',
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('Warren Truss Bridge Assembly'), 'Expected civil model card title');
-    assert.ok(html.includes('🌉 Civil'), 'Expected civil domain badge');
-    assert.ok(html.includes('18 Components'), 'Expected 18 components for truss bridge');
-    assert.ok(html.includes('Beginner'), 'Expected Beginner difficulty');
+  it('search matches names, categories and tags case-insensitively', () => {
+    assert.ok(render({ initialSearchQuery: 'PLANETARY' }).includes('Epicyclic Planetary Gearbox'));
+    assert.ok(render({ initialSearchQuery: 'kinematics' }).includes('Epicyclic Planetary Gearbox'));
+    const none = render({ initialSearchQuery: 'quantum flux capacitor' });
+    assert.ok(none.includes('No matching models') && none.includes('Nothing matches “quantum flux capacitor”.'));
   });
 
-  it('renders Medical tab and displays honest empty state when Medical domain is selected', () => {
-    const gearbox = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID)!;
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        models: [gearbox],
-        initialDomain: 'medical',
-        onLaunchModel: () => {},
-      })
-    );
+  it('an empty registry is handled without throwing', () => {
+    const html = render({ models: [] });
+    assert.ok(html.includes('No models in the catalogue'));
+  });
 
-    assert.ok(html.includes('Medical'), 'Expected Medical tab in navigation');
-    assert.ok(
-      html.includes('No Medical Models Registered Yet'),
-      'Expected honest medical empty state heading'
-    );
-    assert.ok(
-      html.includes('Medical and biomechanical models'),
-      'Expected medical curriculum development note'
-    );
-    assert.ok(
-      html.includes('View Available Engineering Models'),
-      'Expected button to return to available models'
-    );
+  it('uses proper roles: region, search, tablist with selected state', () => {
+    const html = render();
+    assert.ok(html.includes('role="region"') && html.includes('role="search"') && html.includes('role="tablist"'));
+    assert.ok(html.includes('role="tab" aria-selected="true"'));
+    assert.ok(html.includes('<label for=') && html.includes('Search models'));
   });
 });
 
-describe('HomeDashboard — Keyword Search & Combined Filtering', () => {
-  it('matches models by name query case-insensitively', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        initialSearchQuery: 'planetary',
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('Epicyclic Planetary Gearbox'), 'Expected planetary gearbox match');
-  });
-
-  it('matches models by category or tags', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        initialSearchQuery: 'kinematics',
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('Epicyclic Planetary Gearbox'), 'Expected kinematics tag/category match');
-  });
-
-  it('displays no-matching-models state when search yields no results', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        initialSearchQuery: 'hydroelectric turbine generator',
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('No Matching Models Found'), 'Expected no matches heading');
-    assert.ok(
-      html.includes('hydroelectric turbine generator'),
-      'Expected searched query mentioned in empty state'
-    );
-    assert.ok(html.includes('Clear Search &amp; Filters') || html.includes('Clear Search & Filters'), 'Expected clear button');
-  });
-
-  it('handles empty registry gracefully without throwing', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        models: [],
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('No Models in Catalogue'), 'Expected empty catalogue notice');
-    assert.ok(html.includes('The engineering model registry currently contains zero registered models.'));
+describe('Explorer top bar — back to the catalogue', () => {
+  it('has a clear "All models" action when a home handler is given', () => {
+    const html = renderToStaticMarkup(React.createElement(WorkspaceTopBar, {
+      modelName: 'Epicyclic Planetary Gearbox', isLeftDockOpen: false, onToggleLeftDock: () => {}, isRightDockOpen: false,
+      onToggleRightDock: () => {}, renderFps: 60, cameraStatus: 'off', showDiagnostics: false, onToggleDiagnostics: () => {},
+      showRoadmap: false, onToggleRoadmap: () => {}, onNavigateHome: () => {},
+    }));
+    assert.ok(html.includes('All models') && html.includes('aria-label="Back to all models"'));
   });
 });
 
-describe('HomeDashboard — Accessibility & WAI-ARIA Semantics', () => {
-  it('provides proper ARIA roles and accessible tab states for domain navigation', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(HomeDashboard, {
-        initialDomain: 'mechanical',
-        onLaunchModel: () => {},
-      })
-    );
-
-    assert.ok(html.includes('role="region"'), 'Expected dashboard region');
-    assert.ok(html.includes('role="tablist"'), 'Expected tablist role for domain filters');
-    assert.ok(html.includes('role="tab"'), 'Expected tab role on filter buttons');
-    assert.ok(
-      html.includes('aria-selected="true"'),
-      'Expected aria-selected on active mechanical tab'
-    );
-    assert.ok(
-      html.includes('aria-label="Search engineering models"'),
-      'Expected accessible search input label'
-    );
-  });
-});
-
-describe('WorkspaceTopBar — Catalogue Return Navigation', () => {
-  it('renders Catalogue button in top bar when onNavigateHome is provided', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(WorkspaceTopBar, {
-        modelName: 'Epicyclic Planetary Gearbox',
-        domain: 'mechanical',
-        subsystem: 'Transmission',
-        isLeftDockOpen: true,
-        onToggleLeftDock: () => {},
-        isRightDockOpen: true,
-        onToggleRightDock: () => {},
-        renderFps: 60,
-        cameraStatus: 'active',
-        showDiagnostics: false,
-        onToggleDiagnostics: () => {},
-        showRoadmap: false,
-        onToggleRoadmap: () => {},
-        onNavigateHome: () => {},
-      })
-    );
-
-    assert.ok(html.includes('catalogue-btn'), 'Expected catalogue-btn class');
-    assert.ok(html.includes('Catalogue'), 'Expected Catalogue button text');
-    assert.ok(
-      html.includes('aria-label="Return to Engineering Explorer Catalogue Dashboard"'),
-      'Expected accessible catalogue return label'
-    );
-  });
-});
-
-describe('App — View Transitions & Workspace Integration', () => {
-  it('renders HomeDashboard by default when initialView is dashboard', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(App, {
-        initialView: 'dashboard',
-      })
-    );
-
-    assert.ok(html.includes('Engineering Explorer'), 'Expected HomeDashboard title');
-    assert.ok(html.includes('Engineering Model Catalogue'), 'Expected model catalogue');
+describe('App — fixed views (tests and embedded demos)', () => {
+  it('renders the catalogue when initialView is dashboard', () => {
+    const html = renderToStaticMarkup(React.createElement(App, { initialView: 'dashboard' }));
+    assert.ok(html.includes('Model catalogue'));
   });
 
-  it('renders WorkspaceLayout directly when initialView is workspace', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(App, {
-        initialView: 'workspace',
-      })
-    );
-
+  it('renders the explorer directly when initialView is workspace', () => {
+    const html = renderToStaticMarkup(React.createElement(App, { initialView: 'workspace' }));
     assert.ok(html.includes('cad-workspace-shell'), 'Expected CAD workspace shell');
-    assert.ok(html.includes('Assembly Hierarchy'), 'Expected left assembly tree dock');
-    assert.ok(html.includes('Engineering Inspector'), 'Expected right inspector dock');
+    assert.ok(html.includes('Assembly Hierarchy'), 'parts tree still available (keyboard [ )');
+    assert.ok(html.includes('Engineering Inspector'), 'part information dock');
   });
 });
 

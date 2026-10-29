@@ -121,8 +121,8 @@ describe('AssemblyTreePanel Component Rendering', () => {
     assert.ok(html.includes('Primary Drive Shaft'), 'Expected Drive Shaft component');
 
     // Icons
-    assert.ok(html.includes('🗂️') || html.includes('📦'), 'Expected assembly/subassembly icon');
-    assert.ok(html.includes('⚙️'), 'Expected component icon');
+    assert.ok(html.includes('gl-icon-layers') || html.includes('gl-icon-box'), 'Expected assembly/subassembly icon');
+    assert.ok(html.includes('gl-icon-part'), 'Expected component icon');
   });
 
   it('highlights the selected component row matching selectedComponentId', () => {
@@ -175,8 +175,8 @@ describe('AssemblyTreePanel Component Rendering', () => {
 
     // Hidden nodes should have hidden-node class and strikethrough symbol
     assert.ok(html.includes('hidden-node'), 'Expected hidden-node class');
-    assert.ok(html.includes('⊘'), 'Expected hidden visibility icon ⊘');
-    assert.ok(html.includes('👁'), 'Expected visible icon 👁 for unhidden nodes');
+    assert.ok(html.includes('gl-icon-eyeOff'), 'Expected hidden visibility icon');
+    assert.ok(html.includes('gl-icon-eye"'), 'Expected visible icon for unhidden nodes');
     assert.ok(html.includes('2 hidden parts'), 'Expected footer summary of hidden parts');
   });
 

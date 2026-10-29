@@ -83,3 +83,7 @@ coverage/
 # Logs
 *.log
 logs/
+
+.env
+/backend.env
+

@@ -54,6 +54,85 @@
   --cad-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --cad-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.4);
   --cad-shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.55);
+
+  /* ---- Product design system (site pages, account, dashboard) ---- */
+  /* Colour roles */
+  --gl-primary: #38bdf8;            /* actions, links, focus */
+  --gl-primary-strong: #0ea5e9;
+  --gl-primary-ink: #04121d;        /* text on primary buttons (contrast 9:1) */
+  --gl-secondary: #a78bfa;
+  --gl-bg: #070b13;
+  --gl-surface: #0d1422;
+  --gl-surface-2: #131c2e;
+  --gl-surface-3: #1a2539;
+  --gl-border: rgba(148, 163, 184, 0.16);
+  --gl-border-strong: rgba(148, 163, 184, 0.3);
+  --gl-text: #f1f5f9;
+  --gl-text-muted: #9fb0c6;         /* 7.4:1 on --gl-bg */
+  --gl-text-subtle: #7d8da3;        /* 4.9:1 on --gl-bg (body-size minimum) */
+  --gl-success: #34d399;
+  --gl-warning: #fbbf24;
+  --gl-danger: #f87171;
+  --gl-mechanical: #38bdf8;
+  --gl-civil: #fbbf24;
+  --gl-medical: #f472b6;
+
+  /* Spacing scale (4 px base) */
+  --gl-space-1: 4px;
+  --gl-space-2: 8px;
+  --gl-space-3: 12px;
+  --gl-space-4: 16px;
+  --gl-space-5: 24px;
+  --gl-space-6: 32px;
+  --gl-space-7: 48px;
+  --gl-space-8: 64px;
+  --gl-space-9: 96px;
+
+  /* Radii */
+  --gl-radius-sm: 6px;
+  --gl-radius-md: 10px;
+  --gl-radius-lg: 16px;
+  --gl-radius-pill: 999px;
+
+  /* Typography */
+  --gl-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --gl-text-xs: 0.75rem;
+  --gl-text-sm: 0.875rem;
+  --gl-text-md: 1rem;
+  --gl-text-lg: 1.125rem;
+  --gl-text-xl: 1.375rem;
+  --gl-text-2xl: 1.75rem;
+  --gl-text-3xl: clamp(2rem, 1.4rem + 2.4vw, 3rem);
+  --gl-leading: 1.55;
+
+  /* Controls */
+  --gl-control-sm: 32px;
+  --gl-control-md: 40px;
+  --gl-control-lg: 48px;            /* touch targets on mobile */
+  --gl-focus-ring: 0 0 0 3px rgba(56, 189, 248, 0.45);
+
+  /* Shadows and layers */
+  --gl-shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.35);
+  --gl-shadow-pop: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --gl-z-header: 50;
+  --gl-z-menu: 80;
+  --gl-z-dialog: 100;
+  --gl-z-toast: 120;
+
+  /* Breakpoints (reference values used by the media queries) */
+  --gl-bp-mobile: 640px;
+  --gl-bp-tablet: 1024px;
+
+  --gl-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 * {

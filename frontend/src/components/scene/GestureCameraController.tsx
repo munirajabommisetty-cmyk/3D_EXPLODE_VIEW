@@ -650,6 +650,14 @@ export class GestureCameraController {
   }
 
   /**
+   * True while a hand gesture is actively steering the camera (orbit or pinch-zoom).
+   * Used by the scene command executor to defer camera commands instead of fighting the hand.
+   */
+  public isInteracting(): boolean {
+    return this.isGestureInteracting;
+  }
+
+  /**
    * Resets both orbit and pinch tracking states and restores auto-rotation if active.
    */
   public reset(): void {

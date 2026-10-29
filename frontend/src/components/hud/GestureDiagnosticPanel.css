@@ -177,3 +177,6 @@
   text-align: center;
   padding-top: 4px;
 }
+
+/* UI pass: diagnostics live top-left (the top-right corner belongs to the webcam preview) */
+.gesture-diagnostic-panel { top: 52px; left: 16px; right: auto; z-index: 35; }

@@ -33,102 +33,48 @@ function createMockCamera(status: UseCameraReturn['status'] = 'active'): UseCame
 }
 
 describe('WorkspaceTopBar Component', () => {
-  it('renders branding, breadcrumbs, and model name correctly', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(WorkspaceTopBar, {
-        modelName: 'Planetary Gearbox Assembly',
-        domain: 'mechanical',
-        subsystem: 'Transmission Subsystem',
-        isLeftDockOpen: true,
-        onToggleLeftDock: () => {},
-        isRightDockOpen: true,
-        onToggleRightDock: () => {},
-        renderFps: 60,
-        cameraStatus: 'active',
-        showDiagnostics: false,
-        onToggleDiagnostics: () => {},
-        showRoadmap: false,
-        onToggleRoadmap: () => {},
-      })
-    );
+  const bar = (extra: Record<string, unknown> = {}) => renderToStaticMarkup(
+    React.createElement(WorkspaceTopBar, {
+      modelName: 'Planetary Gearbox Assembly', domain: 'mechanical', subsystem: 'Transmission Subsystem',
+      isLeftDockOpen: false, onToggleLeftDock: () => {}, isRightDockOpen: false, onToggleRightDock: () => {},
+      renderFps: 59, cameraStatus: 'off', showDiagnostics: false, onToggleDiagnostics: () => {},
+      showRoadmap: false, onToggleRoadmap: () => {}, onNavigateHome: () => {}, ...extra,
+    })
+  );
 
-    assert.ok(html.includes('GestureLab CAD'), 'Expected brand name');
+  it('shows where the learner is: domain and model name', () => {
+    const html = bar();
     assert.ok(html.includes('Mechanical'), 'Expected domain tag');
-    assert.ok(html.includes('Transmission Subsystem'), 'Expected subsystem breadcrumb');
-    assert.ok(html.includes('Planetary Gearbox Assembly'), 'Expected model name in breadcrumb');
+    assert.ok(html.includes('Planetary Gearbox Assembly'), 'Expected model name');
+    assert.ok(bar({ domain: 'medical' }).includes('Anatomy'), 'Anatomy models are labelled as such');
   });
 
-  it('renders dock toggle buttons with proper accessible labels and aria-expanded state', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(WorkspaceTopBar, {
-        modelName: 'Planetary Gearbox Assembly',
-        isLeftDockOpen: true,
-        onToggleLeftDock: () => {},
-        isRightDockOpen: false,
-        onToggleRightDock: () => {},
-        renderFps: 60,
-        cameraStatus: 'active',
-        showDiagnostics: true,
-        onToggleDiagnostics: () => {},
-        showRoadmap: false,
-        onToggleRoadmap: () => {},
-      })
-    );
-
-    // Left dock button is open -> aria-expanded="true"
-    assert.ok(
-      html.includes('aria-label="Collapse Assembly Hierarchy Dock"'),
-      'Expected collapse label for open left dock'
-    );
-    assert.ok(html.includes('aria-expanded="true"'), 'Expected aria-expanded=true for left dock');
-
-    // Right dock button is closed -> aria-expanded="false"
-    assert.ok(
-      html.includes('aria-label="Expand Engineering Inspector Dock"'),
-      'Expected expand label for closed right dock'
-    );
-    assert.ok(html.includes('aria-expanded="false"'), 'Expected aria-expanded=false for right dock');
+  it('offers only learner actions: back to all models and part information', () => {
+    const html = bar();
+    assert.ok(html.includes('All models') && html.includes('aria-label="Back to all models"'));
+    assert.ok(html.includes('aria-label="Show part information"') && html.includes('aria-pressed="false"'));
+    assert.ok(bar({ isRightDockOpen: true }).includes('aria-label="Hide part information"'));
+    for (const gone of ['Guided Tour', 'Parts</span>', 'More tools', 'roadmap', 'FPS', 'Camera:']) {
+      assert.ok(!html.includes(gone), `no "${gone}" in the learner toolbar`);
+    }
   });
 
-  it('renders live telemetry pills with accurate render FPS and camera status', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(WorkspaceTopBar, {
-        modelName: 'Test Model',
-        isLeftDockOpen: true,
-        onToggleLeftDock: () => {},
-        isRightDockOpen: true,
-        onToggleRightDock: () => {},
-        renderFps: 59,
-        cameraStatus: 'active',
-        showDiagnostics: false,
-        onToggleDiagnostics: () => {},
-        showRoadmap: false,
-        onToggleRoadmap: () => {},
-      })
-    );
-
-    assert.ok(html.includes('59 FPS'), 'Expected 59 FPS rendered');
-    assert.ok(html.includes('Camera: Live'), 'Expected Camera: Live rendered');
+  it('shows the exploded state only while the model is exploded', () => {
+    assert.ok(!bar().includes('Exploded view'));
+    assert.ok(bar({ explodedFactor: 0.8 }).includes('Exploded view'));
   });
 
-  it('renders camera denied or error state accurately in status pill', () => {
-    const html = renderToStaticMarkup(
-      React.createElement(WorkspaceTopBar, {
-        modelName: 'Test Model',
-        isLeftDockOpen: true,
-        onToggleLeftDock: () => {},
-        isRightDockOpen: true,
-        onToggleRightDock: () => {},
-        renderFps: 0,
-        cameraStatus: 'denied',
-        showDiagnostics: false,
-        onToggleDiagnostics: () => {},
-        showRoadmap: false,
-        onToggleRoadmap: () => {},
-      })
-    );
+  it('offers a Reassemble action while exploded (only when a handler is wired)', () => {
+    assert.ok(!bar({ explodedFactor: 0.8 }).includes('Reassemble'), 'no dead button without a handler');
+    const html = bar({ explodedFactor: 0.8, onReassemble: () => {} });
+    assert.ok(html.includes('aria-label="Reassemble the model"') && html.includes('>Reassemble<'));
+    assert.ok(!bar({ onReassemble: () => {} }).includes('Reassemble'), 'hidden while assembled');
+  });
 
-    assert.ok(html.includes('Camera: Denied'), 'Expected Camera: Denied rendered');
+  it('shows the interaction mode from the real camera state', () => {
+    assert.ok(bar().includes('Mouse &amp; voice'));
+    assert.ok(bar({ cameraStatus: 'active' }).includes('Camera on'));
+    assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(bar({ explodedFactor: 0.5, onReassemble: () => {} })), 'no emoji icons');
   });
 
   it('renders active gesture badge in top bar when camera is active and gesture recognized', () => {
@@ -197,11 +143,11 @@ describe('WorkspaceLayout Structural Shell', () => {
     // Right Dock
     assert.ok(html.includes('cad-dock-right'), 'Expected right inspector dock');
     assert.ok(html.includes('Engineering Inspector'), 'Expected Engineering Inspector dock title');
-    assert.ok(html.includes('Task 9.6 Ready'), 'Expected Task 9.6 placeholder badge');
+    assert.ok(!html.includes('Task 9.6'), 'No developer task label in the learner-facing inspector');
 
     // Bottom Status Bar
     assert.ok(html.includes('workspace-status-bar'), 'Expected workspace status bar');
-    assert.ok(html.includes('Phase 9: CAD Workspace Shell'), 'Expected phase meta in status bar');
+    assert.ok(!html.includes('Phase 9'), 'No developer phase text in the learner-facing status bar');
   });
 
   it('renders interactive AssemblyTreePanel nodes in Left Dock', () => {
@@ -305,9 +251,8 @@ describe('WorkspaceLayout Structural Shell', () => {
       })
     );
     assert.ok(
-      htmlMouse.includes('Mouse Orbit &amp; Click Fallback') ||
-        htmlMouse.includes('Mouse Orbit & Click Fallback'),
-      'Expected Mouse Orbit & Click Fallback modality'
+      htmlMouse.includes('Camera off: mouse, keyboard and voice'),
+      'Expected a plain-language camera-off status'
     );
   });
 });

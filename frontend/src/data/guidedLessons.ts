@@ -8,6 +8,9 @@
 
 import { PLANETARY_GEARBOX_MODEL_ID } from '../models/mechanical/planetaryGearboxModel';
 import { WARREN_TRUSS_MODEL_ID } from '../models/civil/warrenTrussBridgeModel';
+import { EYE_MODEL_ID } from '../models/biology/eyeStructures';
+import { RC_FRAME_MODEL_ID } from '../models/civil/rcFrameModel';
+import { STEAM_ENGINE_MODEL_ID } from '../models/mechanical/steamEngineModel';
 
 export interface GuidedLessonStep {
   /** 1-based step index */
@@ -24,14 +27,18 @@ export interface GuidedLessonStep {
   educationalNotes: string[];
   /** Suggested exploded view factor for optimal viewing (0.0 to 1.0) */
   suggestedExplodedFactor?: number;
+  /** Anatomy: show this step in the model's "inside" view (outer cortex hidden). */
+  revealInside?: boolean;
 }
 
 export interface GuidedLesson {
   modelId: string;
   title: string;
-  discipline: 'mechanical' | 'civil';
+  discipline: 'mechanical' | 'civil' | 'medical';
   description: string;
   steps: GuidedLessonStep[];
+  /** Focus the camera on each step's structure (and apply revealInside) through the dispatcher. */
+  frameEachStep?: boolean;
 }
 
 export const PLANETARY_GEARBOX_LESSON: GuidedLesson = {
@@ -223,9 +230,133 @@ export const WARREN_TRUSS_BRIDGE_LESSON: GuidedLesson = {
   ],
 };
 
+
+/**
+ * Human Eye Explorer: follows the path of light, then the signal towards the brain.
+ * Normal anatomy for learning only.
+ */
+export const HUMAN_EYE_LESSON: GuidedLesson = {
+  modelId: EYE_MODEL_ID,
+  title: 'How we see: follow the light through the eye',
+  discipline: 'medical',
+  description: 'Follow light from the cornea to the retina, and the signal along the optic nerve towards the brain. Normal anatomy for learning, not medical advice.',
+  frameEachStep: true,
+  steps: [
+    { stepIndex: 1, componentId: 'cornea', title: 'Cornea', subtitle: 'The clear front window',
+      description: 'Light first passes through the cornea. Its curved surface bends the light and does most of the focusing.',
+      educationalNotes: ['Like the front lens of a camera \u2014 but it is living tissue kept clear because it has no blood vessels.'] },
+    { stepIndex: 2, componentId: 'iris', title: 'Iris', subtitle: 'Controls how much light enters',
+      description: 'The coloured iris widens or narrows the pupil: smaller in bright light, larger in dim light.',
+      educationalNotes: ['Like the aperture of a camera.'] },
+    { stepIndex: 3, componentId: 'pupil', title: 'Pupil', subtitle: 'The opening in the iris',
+      description: 'The pupil is the hole in the middle of the iris through which light continues into the eye.',
+      educationalNotes: ['It looks black because light going in is absorbed inside the eye.'] },
+    { stepIndex: 4, componentId: 'lens', title: 'Lens', subtitle: 'Fine-tunes the focus',
+      description: 'The flexible lens changes shape so that near and far objects make a sharp image on the retina.',
+      educationalNotes: ['The ciliary muscle and the suspensory ligament change its shape.'] },
+    { stepIndex: 5, componentId: 'ciliary_body', title: 'Ciliary body', subtitle: 'Focusing muscle and fluid maker',
+      description: 'Its muscle adjusts the lens for near or far vision, and its processes make the aqueous humour.',
+      educationalNotes: [] },
+    { stepIndex: 6, componentId: 'vitreous_body', title: 'Vitreous body', subtitle: 'Clear gel inside the eye',
+      description: 'Light crosses this clear gel, which keeps the eyeball round, to reach the retina.',
+      educationalNotes: [] },
+    { stepIndex: 7, componentId: 'retina', title: 'Retina', subtitle: 'Turns light into signals',
+      description: 'Light-sensitive cells in the retina turn the image into electrical signals.',
+      educationalNotes: ['The image formed on the retina is upside down; the brain interprets it correctly.'] },
+    { stepIndex: 8, componentId: 'macula', title: 'Macula and fovea', subtitle: 'Sharpest vision',
+      description: 'The fovea, in the centre of the macula, gives the sharpest detail, for example when reading.',
+      educationalNotes: [] },
+    { stepIndex: 9, componentId: 'optic_disc', title: 'Optic disc', subtitle: 'Where the nerve leaves (blind spot)',
+      description: 'Nerve fibres from the whole retina gather here and leave the eye. There are no light-sensitive cells here.',
+      educationalNotes: ['The brain fills in this blind spot, so we do not notice it.'] },
+    { stepIndex: 10, componentId: 'optic_nerve', title: 'Optic nerve (simplified shape)', subtitle: 'Carries the signals towards the brain',
+      description: 'The optic nerve carries the retina\u2019s signals to the brain, where seeing actually happens.',
+      educationalNotes: ['This tube is a simplified educational shape; the atlas file does not include the optic nerve.'] },
+  ],
+};
+
+/** Reinforced concrete frame: from the slab down to the ground, then the steel inside. */
+export const RC_FRAME_LESSON: GuidedLesson = {
+  modelId: RC_FRAME_MODEL_ID,
+  title: 'How a reinforced concrete frame carries loads',
+  discipline: 'civil',
+  description: 'Follow the load from the slab to the ground, then look inside the concrete at the steel that makes it work. A simplified educational model, not a design.',
+  frameEachStep: true,
+  steps: [
+    { stepIndex: 1, componentId: 'slab', title: 'Slab', subtitle: 'Carries what is placed on it',
+      description: 'The slab carries people, furniture and its own weight and passes the load to the beams around it.',
+      educationalNotes: ['Like a table top resting on its frame.'] },
+    { stepIndex: 2, componentId: 'beams', title: 'Beams', subtitle: 'Carry the slab load to the columns',
+      description: 'Beams span between columns. They bend under the slab\u2019s load and pass it to the columns.',
+      educationalNotes: [] },
+    { stepIndex: 3, componentId: 'beam_column_joints', title: 'Beam-column joint', subtitle: 'Where forces change direction',
+      description: 'Forces from the beams pass through the joint into the column, so the joint must be strong and well tied.',
+      educationalNotes: [] },
+    { stepIndex: 4, componentId: 'columns', title: 'Columns', subtitle: 'Carry the load down',
+      description: 'Columns collect the loads from the beams and carry them down, mostly in compression.',
+      educationalNotes: [] },
+    { stepIndex: 5, componentId: 'footings', title: 'Footings', subtitle: 'Spread the load into the ground',
+      description: 'Footings spread each column\u2019s load over a larger area so the soil can carry it.',
+      educationalNotes: ['Like wide snowshoes that stop you sinking into snow.'] },
+    { stepIndex: 6, componentId: 'beam_longitudinal_bars', title: 'Beam bars', subtitle: 'Steel where concrete is stretched', revealInside: true,
+      description: 'Concrete is strong when squeezed but weak when stretched, so steel bars are placed where the beam is stretched by bending.',
+      educationalNotes: ['The concrete cover around the steel protects it from rust and fire.'] },
+    { stepIndex: 7, componentId: 'beam_stirrups', title: 'Stirrups', subtitle: 'Resist shear, hold the bars', revealInside: true,
+      description: 'Closed loops along the beam resist shear near the supports and keep the bars in position.',
+      educationalNotes: [] },
+    { stepIndex: 8, componentId: 'joint_reinforcement', title: 'Joint ties', subtitle: 'Confine the joint', revealInside: true,
+      description: 'Ties continued through the joint confine its concrete, and the beam bars are bent into the joint for anchorage.',
+      educationalNotes: [] },
+  ],
+};
+
+/** Steam locomotive: from fire to turning wheels. */
+export const STEAM_ENGINE_LESSON: GuidedLesson = {
+  modelId: STEAM_ENGINE_MODEL_ID,
+  title: 'From fire to turning wheels',
+  discipline: 'mechanical',
+  description: 'Follow the heat from the firebox to the steam in the cylinders and see how the pistons\u2019 back-and-forth motion turns the driving wheels. The animation shows motion only; no thermodynamics is simulated.',
+  frameEachStep: true,
+  steps: [
+    { stepIndex: 1, componentId: 'firebox', title: 'Firebox', subtitle: 'Heat input',
+      description: 'Fuel burns in the firebox; the hot gases pass through tubes inside the boiler.',
+      educationalNotes: [] },
+    { stepIndex: 2, componentId: 'boiler', title: 'Boiler', subtitle: 'Water becomes steam',
+      description: 'The water in the boiler barrel boils and the steam collects at the top under pressure, in the steam dome.',
+      educationalNotes: [] },
+    { stepIndex: 3, componentId: 'steam_pipe', title: 'Steam pipe', subtitle: 'Steam goes to the cylinders',
+      description: 'Steam from the dome runs through the steam pipe down to the steam chest above each cylinder.',
+      educationalNotes: [] },
+    { stepIndex: 4, componentId: 'slide_valve', title: 'Slide valve', subtitle: 'Directs the steam',
+      description: 'The slide valve lets steam into one end of the cylinder while the other end exhausts.',
+      educationalNotes: ['It is moved by the return crank on the driving wheel, so it always keeps in step with the piston.'] },
+    { stepIndex: 5, componentId: 'piston', title: 'Piston', subtitle: 'Pushed by steam pressure',
+      description: 'Steam pressure pushes the piston along the cylinder: heat energy becomes straight-line motion.',
+      educationalNotes: [] },
+    { stepIndex: 6, componentId: 'crosshead', title: 'Crosshead', subtitle: 'Keeps the motion straight',
+      description: 'The crosshead slides between its guides so the piston rod moves only in a straight line.',
+      educationalNotes: [] },
+    { stepIndex: 7, componentId: 'connecting_rod', title: 'Connecting rod', subtitle: 'Links straight and circular motion',
+      description: 'One end moves straight with the crosshead, the other goes round with the crank pin on the driving wheel.',
+      educationalNotes: ['Like your leg pushing a bicycle pedal round.'] },
+    { stepIndex: 8, componentId: 'coupling_rods', title: 'Coupling rods', subtitle: 'All six wheels drive',
+      description: 'The coupling rods join the crank pins of all three wheels on each side, so they turn together.',
+      educationalNotes: [] },
+    { stepIndex: 9, componentId: 'driving_wheels', title: 'Driving wheels', subtitle: 'Mechanical output',
+      description: 'The turning wheels move the locomotive along the rails. The two sides are set 90\u00b0 apart so it can always start.',
+      educationalNotes: [] },
+    { stepIndex: 10, componentId: 'blast_pipe', title: 'Blast pipe and chimney', subtitle: 'Used steam leaves',
+      description: 'Exhaust steam is blasted up the chimney; each puff draws air through the fire and keeps it burning hot.',
+      educationalNotes: [] },
+  ],
+};
+
 const LESSONS_REGISTRY: Record<string, GuidedLesson> = {
   [PLANETARY_GEARBOX_MODEL_ID]: PLANETARY_GEARBOX_LESSON,
   [WARREN_TRUSS_MODEL_ID]: WARREN_TRUSS_BRIDGE_LESSON,
+  [EYE_MODEL_ID]: HUMAN_EYE_LESSON,
+  [RC_FRAME_MODEL_ID]: RC_FRAME_LESSON,
+  [STEAM_ENGINE_MODEL_ID]: STEAM_ENGINE_LESSON,
 };
 
 /**

@@ -7,6 +7,7 @@
  */
 
 import React, { useEffect, useCallback } from 'react';
+import { Icon } from '../ui/Icon';
 import type { GuidedLesson } from '../../data/guidedLessons';
 import './GuidedLearningPanel.css';
 
@@ -85,7 +86,7 @@ export const GuidedLearningPanel: React.FC<GuidedLearningPanelProps> = ({
         <div className="lesson-top-row">
           <div className="lesson-meta-badge">
             <span className="lesson-discipline-pill">
-              {lesson.discipline === 'mechanical' ? '⚙️ Mechanical' : '🌉 Civil'}
+              {lesson.discipline === 'mechanical' ? 'Mechanical' : 'Civil'}
             </span>
             <span className="lesson-step-pill">
               Step {clampedIndex + 1} of {totalSteps}
@@ -99,7 +100,7 @@ export const GuidedLearningPanel: React.FC<GuidedLearningPanelProps> = ({
             title="Exit Guided Tour [Esc]"
             aria-label="Exit Guided Tour"
           >
-            ✕
+            <Icon name="close" size={16} />
           </button>
         </div>
 
@@ -175,7 +176,7 @@ export const GuidedLearningPanel: React.FC<GuidedLearningPanelProps> = ({
             disabled={clampedIndex === 0}
             aria-label="Previous Lesson Step"
           >
-            ◀ Previous
+            <Icon name="chevronLeft" size={14} /> Previous
           </button>
 
           <button
@@ -186,7 +187,7 @@ export const GuidedLearningPanel: React.FC<GuidedLearningPanelProps> = ({
               clampedIndex === totalSteps - 1 ? 'Finish Guided Tour' : 'Next Lesson Step'
             }
           >
-            {clampedIndex === totalSteps - 1 ? '✓ Finish Tour' : 'Next ▶'}
+            {clampedIndex === totalSteps - 1 ? <><Icon name="check" size={14} /> Finish Tour</> : <>Next <Icon name="chevronRight" size={14} /></>}
           </button>
         </div>
       </footer>

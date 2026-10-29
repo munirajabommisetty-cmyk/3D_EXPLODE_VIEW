@@ -19,6 +19,7 @@ import type {
   ModelRuntimeInstance,
 } from '../../types/models';
 import type { CivilComponentMetadata } from '../../types/engineering';
+import { WARREN_TRUSS_RELATIONSHIPS } from './warrenTrussRelationships';
 
 export const WARREN_TRUSS_MODEL_ID = 'warren_truss_bridge';
 
@@ -367,13 +368,18 @@ export function getWarrenTrussComponentMetadata(
   componentId: string
 ): CivilComponentMetadata | null {
   const metadata = CIVIL_BRIDGE_METADATA[componentId as WarrenTrussComponentId];
-  return metadata ? { ...metadata } : null;
+  if (!metadata) return null;
+  const relationships = WARREN_TRUSS_RELATIONSHIPS.get(componentId);
+  return relationships ? { ...metadata, relationships: [...relationships] } : { ...metadata };
 }
 
 /**
  * Standardized EngineeringModelDefinition for the Civil Warren Truss Bridge
  */
 export const warrenTrussBridgeModel: EngineeringModelDefinition = {
+  // Retired from the student catalogue (replaced by the Reinforced Concrete Structural System
+  // Explorer); kept registered because many test suites use it as a second model.
+  inCatalogue: false,
   id: WARREN_TRUSS_MODEL_ID,
   name: 'Warren Truss Bridge Assembly',
   domain: 'civil',

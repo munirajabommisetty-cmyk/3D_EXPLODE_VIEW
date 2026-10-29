@@ -105,7 +105,7 @@ describe('EngineeringInspectorPanel — Empty & Fallback States', () => {
     );
 
     assert.ok(html.includes('No Component Selected'), 'Expected empty state title');
-    assert.ok(html.includes('Task 9.6 Ready'), 'Expected Task 9.6 placeholder badge');
+    assert.ok(!html.includes('Task 9.6'), 'No developer task label in the learner-facing inspector');
     assert.ok(
       html.includes('aria-label="Engineering Component Inspector (No Selection)"'),
       'Expected accessible ARIA label for empty inspector'
@@ -147,7 +147,7 @@ describe('EngineeringInspectorPanel — Mechanical Component Rendering', () => {
     assert.ok(html.includes('Sun Gear'), 'Expected component name');
     assert.ok(html.includes('ID: sun_gear'), 'Expected component ID');
     assert.ok(html.includes('Central Driving Input'), 'Expected functional role subtitle');
-    assert.ok(html.includes('⚙️ Mechanical'), 'Expected mechanical domain pill');
+    assert.ok(/domain-pill mechanical[^>]*>Mechanical</.test(html), 'Expected mechanical domain pill');
 
     // Overview content
     assert.ok(html.includes('Functional Description'), 'Expected functional description header');
@@ -217,7 +217,7 @@ describe('EngineeringInspectorPanel — Civil Component Rendering', () => {
 
     assert.ok(html.includes('Warren Truss Top Chord'), 'Expected civil member name');
     assert.ok(html.includes('ID: truss_top_chord_01'), 'Expected civil part ID');
-    assert.ok(html.includes('🌉 Civil'), 'Expected civil domain pill');
+    assert.ok(/domain-pill civil[^>]*>Civil</.test(html), 'Expected civil domain pill');
     assert.ok(html.includes('Primary Compression Chord'), 'Expected functional role');
     assert.ok(html.includes('Top Chord'), 'Expected formatted structural position');
     assert.ok(html.includes('Educational Notes'), 'Expected Educational Notes header for civil component');
@@ -383,5 +383,51 @@ describe('EngineeringInspectorPanel — Accessibility & Helpers', () => {
     );
     assert.ok(htmlValue.includes('Speed'), 'Expected label in output');
     assert.ok(htmlValue.includes('1200 RPM'), 'Expected value and unit in output');
+  });
+});
+
+describe('EngineeringInspectorPanel — Ask the voice tutor (voice-first milestone)', () => {
+  const gearboxModel = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID)!;
+  it('shows the tutor buttons for a selected part only when wired to the voice tutor', () => {
+    const withTutor = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, {
+      componentId: 'sun_gear', activeModel: gearboxModel, onClose: () => {}, onAskTutor: () => {},
+    }));
+    for (const label of ['Ask the tutor', 'Explain', 'Why is it needed?', 'How does it work?', 'What if it fails?']) {
+      assert.ok(withTutor.includes(label), label);
+    }
+    const without = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, {
+      componentId: 'sun_gear', activeModel: gearboxModel, onClose: () => {},
+    }));
+    assert.ok(!without.includes('Ask the tutor'));
+  });
+
+  it('empty state offers the voice tutor and keeps the existing guidance', () => {
+    const html = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, {
+      componentId: null, onClose: () => {}, onAskTutor: () => {},
+    }));
+    assert.ok(html.includes('Voice tutor') && html.includes('Explain this model'));
+    assert.ok(html.includes('No Component Selected') && html.includes('Hold steady for 1.2s dwell'));
+  });
+});
+
+describe('EngineeringInspectorPanel — relationship map (UI redesign)', () => {
+  it('draws each real relationship as part → relation → named part, from the model metadata only', () => {
+    const model = modelRegistry.getCatalogueModels().find((m) =>
+      m.getAllComponentIds().some((id) => (m.getComponentMetadata(id)?.relationships?.length ?? 0) > 0));
+    assert.ok(model, 'at least one catalogue model declares relationships');
+    const id = model.getAllComponentIds().find((c) => (model.getComponentMetadata(c)?.relationships?.length ?? 0) > 0)!;
+    const meta = model.getComponentMetadata(id)!;
+    const html = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, { componentId: id, activeModel: model }));
+    assert.ok(html.includes('class="relation-map"'));
+    assert.equal((html.match(/class="relation-row"/g) ?? []).length, meta.relationships!.length, 'one row per relationship, nothing invented');
+    const target = meta.relationships![0].targetComponentId;
+    const targetName = model.getComponentMetadata(target)?.name ?? target;
+    assert.ok(html.includes(`>${targetName}<`), 'target shown by its part name');
+  });
+
+  it('uses no emoji as interface icons', () => {
+    const html = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, { componentId: null, onAskTutor: () => {} }));
+    assert.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(html), 'no emoji in the inspector');
+    assert.ok(html.includes('gl-icon'), 'inline SVG icons instead');
   });
 });

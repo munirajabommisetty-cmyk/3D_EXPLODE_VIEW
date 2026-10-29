@@ -138,9 +138,12 @@ export class ModelLifecycleManager {
       return;
     }
 
+    // Only objects that belong to a real component are toggled: named helpers such as an overlay
+    // group (e.g. the RC frame's 'load_path_overlay') keep their own visibility
+    const validIds = new Set(this.activeModel?.getAllComponentIds() ?? []);
     this.activeRuntime.rootGroup.traverse((obj) => {
       const compId = obj.userData?.componentId || obj.name;
-      if (typeof compId === 'string' && compId.length > 0) {
+      if (typeof compId === 'string' && validIds.has(compId)) {
         obj.visible = !this.hiddenComponentIds.has(compId);
       }
     });
@@ -160,19 +163,39 @@ export class ModelLifecycleManager {
       return true;
     }
 
-    // 2. Generic fallback isolation via scene traversal
+    // 2. Generic fallback isolation via scene traversal.
+    // Only objects that resolve to one of the model's real component IDs are toggled. Named
+    // containers (e.g. the 'planetary_gearbox_assembly' wrapper group) are left alone — hiding
+    // them would hide every child, including the isolated component itself.
+    const validIds = new Set(this.activeModel?.getAllComponentIds() ?? []);
+    const resolve = (obj: THREE.Object3D): string | null => {
+      const compId = obj.userData?.componentId || obj.name;
+      return typeof compId === 'string' && validIds.has(compId) ? compId : null;
+    };
+    const root = this.activeRuntime.rootGroup;
+
     if (componentId) {
-      this.activeRuntime.rootGroup.traverse((obj) => {
-        const compId = obj.userData?.componentId || obj.name;
-        if (typeof compId === 'string' && compId.length > 0) {
+      const isolatedObjects: THREE.Object3D[] = [];
+      root.traverse((obj) => {
+        const compId = resolve(obj);
+        if (compId) {
           obj.visible = compId === componentId;
+          if (compId === componentId) isolatedObjects.push(obj);
         }
       });
+      // Every ancestor of the isolated component must be visible for it to render
+      for (const obj of isolatedObjects) {
+        let parent = obj.parent;
+        while (parent && parent !== root.parent) {
+          parent.visible = true;
+          parent = parent.parent;
+        }
+      }
     } else {
       // Re-apply normal visibility states
-      this.activeRuntime.rootGroup.traverse((obj) => {
-        const compId = obj.userData?.componentId || obj.name;
-        if (typeof compId === 'string' && compId.length > 0) {
+      root.traverse((obj) => {
+        const compId = resolve(obj);
+        if (compId) {
           obj.visible = !this.hiddenComponentIds.has(compId);
         }
       });
@@ -185,6 +208,23 @@ export class ModelLifecycleManager {
    */
   public getIsolatedComponentId(): string | null {
     return this.isolatedComponentId;
+  }
+
+  /**
+   * World-space bounding box of a component's meshes, or null if it has none in the active model.
+   */
+  public getComponentBounds(componentId: string): THREE.Box3 | null {
+    if (!this.activeRuntime) return null;
+    const box = new THREE.Box3();
+    let found = false;
+    this.activeRuntime.rootGroup.traverse((obj) => {
+      const compId = obj.userData?.componentId || obj.name;
+      if (compId === componentId && (obj as THREE.Mesh).isMesh) {
+        box.expandByObject(obj);
+        found = true;
+      }
+    });
+    return found && !box.isEmpty() ? box : null;
   }
 
   /**

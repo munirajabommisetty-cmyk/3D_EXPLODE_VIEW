@@ -196,10 +196,15 @@
 
 .node-label {
   flex: 1;
-  white-space: nowrap;
+  /* Up to two lines so long engineering names stay readable (full name also in the tooltip) */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 0.77rem;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+  font-size: 0.8rem;
 }
 
 .node-children-count {

@@ -7,7 +7,8 @@
  * deterministic runtime type guards.
  */
 
-export type EngineeringDomain = 'mechanical' | 'civil';
+/** 'medical' = anatomy learning models (Human Brain Explorer); shown under the dashboard's Medical tab. */
+export type EngineeringDomain = 'mechanical' | 'civil' | 'medical';
 
 /**
  * Common engineering specification entry (key-value pair)
@@ -124,11 +125,28 @@ export interface CivilComponentMetadata extends BaseComponentMetadata {
 }
 
 /**
+ * Anatomy metadata (Human Brain Explorer). Describes NORMAL anatomy and general function for
+ * learning only: never diagnosis, symptoms or treatment.
+ */
+export interface MedicalComponentMetadata extends BaseComponentMetadata {
+  domain: 'medical';
+  /** Visible on the outer surface of the brain, or deep inside (shown in the "inside" view). */
+  region: 'external' | 'internal';
+  /** Atlas meshes (node names without the _L/_R hemisphere suffix) that make up this structure. */
+  atlasStructures: string[];
+  /** Plain-language note that body functions rely on networks of structures. */
+  networkNote?: string;
+  /** 'atlas' = a real mesh of the asset; 'simplified' = an educational shape added by the app. */
+  representation?: 'atlas' | 'simplified';
+}
+
+/**
  * Polymorphic union of all domain component metadata types
  */
 export type EngineeringComponentMetadata =
   | MechanicalComponentMetadata
-  | CivilComponentMetadata;
+  | CivilComponentMetadata
+  | MedicalComponentMetadata;
 
 /* ========================================================================= */
 /*                              Type Guards                                  */

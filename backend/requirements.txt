@@ -1,0 +1,9 @@
+# Voice backend (Phase 11, Task V2). Versions pinned to those already installed.
+fastapi==0.115.0
+uvicorn==0.30.6
+python-multipart==0.0.9   # FastAPI multipart uploads (audio files)
+requests==2.32.3          # HTTP calls to Gnani
+
+# Tests
+pytest==9.1.1
+httpx==0.27.2             # FastAPI TestClient

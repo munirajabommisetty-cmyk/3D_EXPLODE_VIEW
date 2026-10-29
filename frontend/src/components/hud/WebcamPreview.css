@@ -1,8 +1,9 @@
 /* PiP Webcam Preview Styling */
 .webcam-pip-container {
   position: absolute;
-  bottom: 24px;
-  left: 24px;
+  /* Above the viewport toolbar (bottom: 16px) so its view buttons stay visible */
+  bottom: 64px;
+  left: 16px;
   width: 240px;
   background: rgba(17, 24, 39, 0.88);
   backdrop-filter: blur(14px);
@@ -257,4 +258,26 @@
   background: rgba(239, 68, 68, 0.25);
   border-color: #ef4444;
   color: #ffffff;
+}
+
+/* UI pass: the webcam chip sits bottom-right just above the voice tutor; opened, the live preview
+   moves to the top-right corner of the viewport so it never covers the model's centre. */
+.webcam-pip-container {
+  left: auto;
+  right: 16px;
+  top: 16px;
+  bottom: auto;
+  width: 300px;
+  border-radius: 16px;
+}
+.webcam-pip-container.minimized {
+  top: auto;
+  bottom: 112px; /* clear of the voice tutor bar (two text lines + orb) */
+  width: 190px;
+  border-radius: 999px;
+}
+.webcam-pip-container.minimized .pip-header { background: transparent; border-bottom: none; padding: 7px 14px; }
+@media (max-width: 640px) {
+  .webcam-pip-container { right: 8px; top: 8px; width: min(260px, calc(100% - 16px)); }
+  .webcam-pip-container.minimized { bottom: 104px; }
 }

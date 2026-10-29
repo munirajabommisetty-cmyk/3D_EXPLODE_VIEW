@@ -14,6 +14,9 @@ import type {
 } from '../types/engineering';
 import { planetaryGearboxModel } from './mechanical/planetaryGearboxModel';
 import { warrenTrussBridgeModel } from './civil/warrenTrussBridgeModel';
+import { humanEyeModel } from './biology/eyeModel';
+import { rcFrameModel } from './civil/rcFrameModel';
+import { steamEngineModel } from './mechanical/steamEngineModel';
 
 export class ModelRegistryService {
   private models: Map<string, EngineeringModelDefinition> = new Map();
@@ -96,6 +99,14 @@ export class ModelRegistryService {
     this.clear();
     this.register(planetaryGearboxModel);
     this.register(warrenTrussBridgeModel);
+    this.register(humanEyeModel);
+    this.register(rcFrameModel);
+    this.register(steamEngineModel);
+  }
+
+  /** Models shown to students (retired models stay registered for compatibility and tests). */
+  public getCatalogueModels(): EngineeringModelDefinition[] {
+    return this.getAllModels().filter((m) => m.inCatalogue !== false);
   }
 }
 
@@ -106,6 +117,9 @@ export class ModelRegistryService {
 export const modelRegistry = new ModelRegistryService();
 modelRegistry.register(planetaryGearboxModel);
 modelRegistry.register(warrenTrussBridgeModel);
+modelRegistry.register(humanEyeModel);
+modelRegistry.register(rcFrameModel);
+modelRegistry.register(steamEngineModel);
 
 // Export uppercase alias for architectural convenience
 export const ModelRegistry = modelRegistry;

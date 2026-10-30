@@ -1,5 +1,7 @@
 import React from 'react';
 import type { GestureRecognitionResult } from '../../types/gestures';
+import { Icon } from '../ui/Icon';
+import { gestureIcon } from '../ui/gestureIcon';
 import './GestureBadge.css';
 
 export interface GestureBadgeProps {
@@ -7,13 +9,6 @@ export interface GestureBadgeProps {
   className?: string;
   compact?: boolean;
 }
-
-const GESTURE_ICONS: Record<string, string> = {
-  OPEN_PALM: '✋',
-  POINTING: '☝️',
-  PINCH: '🤏',
-  NONE: '⚪',
-};
 
 const GESTURE_LABELS: Record<string, string> = {
   OPEN_PALM: 'Open Palm',
@@ -28,7 +23,6 @@ export const GestureBadge: React.FC<GestureBadgeProps> = ({
   compact = false,
 }) => {
   const { gesture, rawGesture, confidence, isStable, consecutiveFrames } = gestureResult;
-  const icon = GESTURE_ICONS[gesture] || '⚪';
   const label = GESTURE_LABELS[gesture] || gesture;
   const percent = Math.round(confidence * 100);
 
@@ -37,13 +31,16 @@ export const GestureBadge: React.FC<GestureBadgeProps> = ({
       className={`gesture-hud-badge ${gesture.toLowerCase()} ${isStable ? 'stable' : 'settling'} ${
         compact ? 'compact' : ''
       } ${className}`}
-      title={`Active Gesture: ${label} (${percent}% confidence, ${consecutiveFrames} frames)`}
+      title={`Gesture: ${label} (${percent}% confidence, ${consecutiveFrames} frames)`}
+      role="status"
+      aria-label={gesture === 'NONE' ? 'No gesture recognised' : `Gesture: ${label}, ${percent}% confidence`}
     >
       <span className="gesture-icon" aria-hidden="true">
-        {icon}
+        <Icon name={gestureIcon(gesture)} size={compact ? 14 : 16} />
       </span>
       <div className="gesture-details">
         <span className="gesture-name">{label}</span>
+        {compact && gesture !== 'NONE' && <span className="gesture-confidence">{percent}%</span>}
         {!compact && (
           <span className="gesture-meta">
             {gesture !== 'NONE' ? (
@@ -51,13 +48,13 @@ export const GestureBadge: React.FC<GestureBadgeProps> = ({
                 <span className="gesture-confidence">{percent}%</span>
                 <span className={`gesture-stability-dot ${isStable ? 'active' : 'pending'}`} />
                 <span className="gesture-stability-text">
-                  {isStable ? 'STABLE' : `HOLD (${consecutiveFrames}/3)`}
+                  {isStable ? 'Stable' : `Hold ${consecutiveFrames}/3`}
                 </span>
               </>
             ) : rawGesture !== 'NONE' ? (
-              <span className="gesture-settling-text">DETECTING...</span>
+              <span className="gesture-settling-text">Detecting…</span>
             ) : (
-              <span className="gesture-idle-text">NO GESTURE</span>
+              <span className="gesture-idle-text">No gesture</span>
             )}
           </span>
         )}

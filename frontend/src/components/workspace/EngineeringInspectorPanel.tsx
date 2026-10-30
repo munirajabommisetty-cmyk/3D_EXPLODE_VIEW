@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback, useId } from 'react';
+import { Icon } from '../ui/Icon';
 import type {
   EngineeringComponentMetadata,
   MechanicalComponentMetadata,
   CivilComponentMetadata,
+  MedicalComponentMetadata,
 } from '../../types/engineering';
 import type { EngineeringModelDefinition } from '../../types/models';
 import { resolveInspectorMetadata, formatRoleTitle } from '../../utils/inspectorUtils';
@@ -23,6 +25,8 @@ export interface EngineeringInspectorPanelProps {
   className?: string;
   /** Optional initial tab to display (defaults to 'overview') */
   initialTab?: InspectorTab;
+  /** Ask the voice tutor something about this part (same path as speaking it). */
+  onAskTutor?: (request: string) => void;
 }
 
 /**
@@ -61,6 +65,7 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
   onClose,
   className = '',
   initialTab = 'overview',
+  onAskTutor,
 }) => {
   const [activeTab, setActiveTab] = useState<InspectorTab>(initialTab);
   const panelId = useId();
@@ -113,9 +118,8 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
         aria-label="Engineering Component Inspector (No Selection)"
       >
         <div className="inspector-empty-placeholder">
-          <div className="empty-badge placeholder-badge">Task 9.6 Ready</div>
           <span className="empty-icon" aria-hidden="true">
-            🔍
+            <Icon name="target" size={28} strokeWidth={1.6} />
           </span>
           <h3 className="empty-title">No Component Selected</h3>
           <p className="empty-description">
@@ -123,22 +127,34 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
             any part in the 3D viewport or assembly tree to inspect engineering
             specifications.
           </p>
+          {onAskTutor && (
+            <div className="inspector-tutor-card">
+              <h4 className="card-section-title">Voice tutor</h4>
+              <p className="empty-description">
+                Select a part, then tap the mic (or press M) and ask “Explain this part”. You can also say
+                “Show the back” or “Zoom in”, in English, తెలుగు or हिन्दी.
+              </p>
+              <button type="button" className="tutor-ask-btn" onClick={() => onAskTutor('explain how this model works')}>
+                <Icon name="cap" size={15} /> Explain this model
+              </button>
+            </div>
+          )}
           <div className="empty-hint-list">
             <div className="hint-row">
               <span className="hint-bullet" aria-hidden="true">
-                ☝
+                <Icon name="pointer" size={14} />
               </span>
               <span>Point at component to target</span>
             </div>
             <div className="hint-row">
               <span className="hint-bullet" aria-hidden="true">
-                ⏱
+                <Icon name="clock" size={14} />
               </span>
               <span>Hold steady for 1.2s dwell</span>
             </div>
             <div className="hint-row">
               <span className="hint-bullet" aria-hidden="true">
-                🖱
+                <Icon name="mouse" size={14} />
               </span>
               <span>Or click directly on component</span>
             </div>
@@ -167,13 +183,13 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
             title="Deselect component [Esc]"
             aria-label="Close component inspector"
           >
-            ✕
+            <Icon name="close" size={16} />
           </button>
         </div>
         <div className="inspector-content">
           <div className="inspector-alert-box">
             <span className="alert-icon" aria-hidden="true">
-              ⚠️
+              <Icon name="alert" size={16} />
             </span>
             <p>Component metadata unavailable for &quot;{componentId}&quot;.</p>
           </div>
@@ -188,6 +204,8 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
   const isCivil = comp.domain === 'civil';
   const mechanical = isMechanical ? (comp as MechanicalComponentMetadata) : null;
   const civil = isCivil ? (comp as CivilComponentMetadata) : null;
+  // Anatomy modules (Human Eye Explorer): anatomy facts instead of engineering parameters
+  const anatomy = comp.domain === 'medical' ? (comp as MedicalComponentMetadata) : null;
 
   // Filter material-specific specifications if present
   const materialSpecs = comp.specifications?.filter((spec) => {
@@ -222,7 +240,7 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
               className={`domain-pill ${comp.domain}`}
               title={`Engineering Discipline: ${comp.domain}`}
             >
-              {comp.domain === 'mechanical' ? '⚙️ Mechanical' : '🌉 Civil'}
+              {comp.domain === 'mechanical' ? 'Mechanical' : comp.domain === 'medical' ? 'Anatomy' : 'Civil'}
             </span>
             <span className="id-badge" title={`Unique component ID: ${comp.id}`}>
               ID: {comp.id}
@@ -244,9 +262,23 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
           title="Deselect component [Esc]"
           aria-label="Close component inspector"
         >
-          ✕
+          <Icon name="close" size={16} />
         </button>
       </div>
+
+      {/* Ask the voice tutor about this part (same path as speaking the request) */}
+      {onAskTutor && (
+        <div className="inspector-tutor-row" role="group" aria-label={`Ask the tutor about ${comp.name}`}>
+          <span className="tutor-row-label">Ask the tutor</span>
+          <button type="button" className="tutor-ask-btn primary" onClick={() => onAskTutor(`explain the ${comp.name}`)}><Icon name="cap" size={14} /> Explain</button>
+          <button type="button" className="tutor-ask-btn" onClick={() => onAskTutor(`why is the ${comp.name} needed`)}>Why is it needed?</button>
+          <button type="button" className="tutor-ask-btn" onClick={() => onAskTutor(`how does the ${comp.name} work`)}>How does it work?</button>
+          {/* Anatomy: no "what if it fails" (that would invite medical speculation); ask about connections instead */}
+          {comp.domain === 'medical'
+            ? <button type="button" className="tutor-ask-btn" onClick={() => onAskTutor(`show the parts connected to the ${comp.name}`)}>What is it connected to?</button>
+            : <button type="button" className="tutor-ask-btn" onClick={() => onAskTutor(`what happens if the ${comp.name} fails`)}>What if it fails?</button>}
+        </div>
+      )}
 
       {/* 2. Tab Navigation Bar */}
       <nav
@@ -321,7 +353,7 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
                 <MetadataRow label="Part ID" value={comp.id} />
                 <MetadataRow
                   label="Discipline"
-                  value={comp.domain === 'mechanical' ? 'Mechanical Engineering' : 'Civil Engineering'}
+                  value={comp.domain === 'mechanical' ? 'Mechanical Engineering' : comp.domain === 'medical' ? 'Neuroanatomy (learning model)' : 'Civil Engineering'}
                 />
                 <MetadataRow label="Functional Role" value={comp.role} />
                 {comp.assemblyRole && (
@@ -343,15 +375,19 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
             {comp.relationships && comp.relationships.length > 0 && (
               <div className="inspector-card">
                 <h4 className="card-section-title">Component Relationships</h4>
-                <div className="metadata-table">
-                  {comp.relationships.map((rel, index) => (
-                    <MetadataRow
-                      key={`rel-${index}-${rel.targetComponentId}`}
-                      label={formatRoleTitle(rel.relationshipType)}
-                      value={`${rel.targetComponentId}${rel.description ? ` (${rel.description})` : ''}`}
-                    />
-                  ))}
-                </div>
+                <div className="relation-root" aria-hidden="true">{comp.name}</div>
+                <ul className="relation-map" aria-label={`How the ${comp.name} connects to other parts`}>
+                  {comp.relationships.map((rel, index) => {
+                    const targetName = activeModel?.getComponentMetadata(rel.targetComponentId)?.name ?? rel.targetComponentId;
+                    return (
+                      <li key={`rel-${index}-${rel.targetComponentId}`} className="relation-row">
+                        <span className="relation-type">{formatRoleTitle(rel.relationshipType)}</span>
+                        <span className="relation-node" title={`${targetName} (${rel.targetComponentId})`}>{targetName}</span>
+                        {rel.description && <span className="relation-desc">{rel.description}</span>}
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
             )}
 
@@ -360,7 +396,7 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
               (civil?.educationalNotes && civil.educationalNotes.length > 0)) && (
               <div className="inspector-card">
                 <h4 className="card-section-title">
-                  {isCivil ? 'Educational Notes' : 'Engineering Notes'}
+                  {isCivil ? 'Educational Notes' : anatomy ? 'Key Facts' : 'Engineering Notes'}
                 </h4>
                 <ul className="notes-list">
                   {comp.engineeringNotes?.map((note, index) => (
@@ -387,6 +423,18 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
             aria-labelledby={`${panelId}-tab-specifications`}
             className="tab-panel specifications-panel"
           >
+            {/* Anatomy: where it is, whether it is an atlas mesh or a simplified shape, learning-only notice */}
+            {anatomy && (
+              <div className="inspector-card">
+                <h4 className="card-section-title">Anatomy</h4>
+                <MetadataRow label="Location" value={anatomy.region === 'external' ? 'Visible from outside' : 'Inside'} />
+                <MetadataRow label="Model" value={anatomy.representation === 'simplified' ? 'Simplified educational shape (not in the atlas file)' : 'Reference-atlas mesh'} />
+                <MetadataRow label="Atlas meshes" value={anatomy.atlasStructures.length ? String(anatomy.atlasStructures.length) : null} />
+                {anatomy.networkNote && <p className="description-text">{anatomy.networkNote}</p>}
+                <p className="description-text">Learning model of normal anatomy (HuBMAP Human Reference Atlas). Not medical advice.</p>
+              </div>
+            )}
+
             {/* Mechanical Kinematics & Sizing Section */}
             {mechanical && (
               <div className="inspector-card">
@@ -518,7 +566,7 @@ export const EngineeringInspectorPanel: React.FC<EngineeringInspectorPanelProps>
               /* Clear Materials Empty State */
               <div className="tab-empty-box">
                 <span className="tab-empty-icon" aria-hidden="true">
-                  🧪
+                  <Icon name="flask" size={24} strokeWidth={1.6} />
                 </span>
                 <h4 className="tab-empty-title">No Material Data Available</h4>
                 <p className="tab-empty-text">

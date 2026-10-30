@@ -296,3 +296,16 @@
     transition: none;
   }
 }
+
+/* UI pass: a compact lesson card bottom-left, clear of the view toolbar and the voice tutor */
+.guided-learning-panel {
+  left: 16px;
+  bottom: 72px;
+  transform: none;
+  width: min(400px, calc(100% - 32px));
+  max-height: calc(100% - 140px);
+  overflow-y: auto;
+  border-radius: 16px;
+  animation: guidedCardIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes guidedCardIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }

@@ -20,6 +20,7 @@ import type {
 } from '../../types/models';
 import type { MechanicalComponentMetadata } from '../../types/engineering';
 import type { MechanicalComponentId } from '../../types/assembly';
+import { PLANETARY_GEARBOX_RELATIONSHIPS } from './planetaryGearboxRelationships';
 
 export const PLANETARY_GEARBOX_MODEL_ID = 'planetary_gearbox';
 
@@ -126,9 +127,11 @@ export function getPlanetaryGearboxComponentMetadata(
     return null;
   }
 
+  const relationships = PLANETARY_GEARBOX_RELATIONSHIPS.get(componentId);
   return {
     ...existing,
     domain: 'mechanical',
+    ...(relationships ? { relationships: [...relationships] } : {}),
   };
 }
 
@@ -153,13 +156,22 @@ export const planetaryGearboxModel: EngineeringModelDefinition = {
   ],
   componentCount: PLANETARY_GEARBOX_COMPONENT_IDS.length,
   cameraConfig: {
-    initialPosition: [0, 4, 9],
+    initialPosition: [0, 5.6, 6.6],
     target: [0, 0, 0],
     minDistance: 2.0,
     maxDistance: 25.0,
     fov: 45,
     defaultPreset: 'isometric',
   },
+
+  animations: [
+    {
+      id: 'gear_train_rotation',
+      label: 'Epicyclic gear train in motion',
+      description:
+        'Sun gear (input) drives the planet gears, which roll inside the fixed ring gear and turn the planet carrier (output) at a reduced speed.',
+    },
+  ],
 
   getAssemblyTree: getPlanetaryGearboxAssemblyTree,
 

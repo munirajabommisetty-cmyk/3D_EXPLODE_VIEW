@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Icon } from '../ui/Icon';
 import { useCamera, type UseCameraReturn } from '../../hooks/useCamera';
 import { useHandLandmarker } from '../../hooks/useHandLandmarker';
 import { useGestureRecognition } from '../../hooks/useGestureRecognition';
@@ -25,12 +26,19 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
   const internalCamera = useCamera();
   const camera = externalCamera || internalCamera;
 
-  const [isMinimized, setIsMinimized] = useState<boolean>(false);
-
   const { status, errorMessage, startCamera, stopCamera, videoRef } = camera;
 
   const isStreaming = status === 'active';
   const isRequesting = status === 'requesting';
+
+  // Compact while the camera is off so it does not cover the model; it opens when the camera
+  // starts (or when the user expands it), and the user can still minimise it at any time.
+  const [isMinimized, setIsMinimized] = useState<boolean>(!isStreaming);
+  const [wasStreaming, setWasStreaming] = useState(isStreaming);
+  if (isStreaming !== wasStreaming) {
+    setWasStreaming(isStreaming);
+    if (isStreaming) setIsMinimized(false);
+  }
 
   // Initialize MediaPipe HandLandmarker when camera stream is active
   const handTracker = useHandLandmarker({
@@ -66,7 +74,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
       <div className="pip-header">
         <div className="pip-title-group">
           <span className={`pip-status-dot ${status}`} />
-          <span className="pip-title">Webcam Feed</span>
+          <span className="pip-title">Camera &amp; gestures</span>
         </div>
         <div className="pip-header-actions">
           <button
@@ -76,7 +84,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             title={isMinimized ? 'Expand Webcam Preview' : 'Minimize Webcam Preview'}
             aria-label={isMinimized ? 'Expand Webcam Preview' : 'Minimize Webcam Preview'}
           >
-            {isMinimized ? '▲' : '▼'}
+            <Icon name={isMinimized ? 'chevronUp' : 'chevronDown'} size={14} />
           </button>
         </div>
       </div>
@@ -98,9 +106,9 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* State Overlay: Idle / Camera Off */}
             {status === 'idle' && (
               <div className="pip-state-overlay idle">
-                <div className="state-icon">📷</div>
-                <p className="state-title">Camera Disconnected</p>
-                <p className="state-desc">Click below to start local webcam tracking</p>
+                <div className="state-icon"><Icon name="camera" size={24} strokeWidth={1.6} /></div>
+                <p className="state-title">Camera off</p>
+                <p className="state-desc">Start the camera to control the model with hand gestures. Video stays on this device.</p>
               </div>
             )}
 
@@ -116,7 +124,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* State Overlay: Permission Denied */}
             {status === 'denied' && (
               <div className="pip-state-overlay denied">
-                <div className="state-icon warning">🚫</div>
+                <div className="state-icon warning"><Icon name="ban" size={24} strokeWidth={1.6} /></div>
                 <p className="state-title">Permission Denied</p>
                 <p className="state-desc">{errorMessage || 'Camera access blocked in browser'}</p>
               </div>
@@ -125,7 +133,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* State Overlay: Device Not Found */}
             {status === 'not_found' && (
               <div className="pip-state-overlay not-found">
-                <div className="state-icon warning">🔌</div>
+                <div className="state-icon warning"><Icon name="plug" size={24} strokeWidth={1.6} /></div>
                 <p className="state-title">No Camera Found</p>
                 <p className="state-desc">{errorMessage || 'Connect a webcam to continue'}</p>
               </div>
@@ -134,7 +142,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* State Overlay: Hardware Unavailable */}
             {status === 'unavailable' && (
               <div className="pip-state-overlay unavailable">
-                <div className="state-icon warning">⚠️</div>
+                <div className="state-icon warning"><Icon name="alert" size={24} strokeWidth={1.6} /></div>
                 <p className="state-title">Camera In Use</p>
                 <p className="state-desc">{errorMessage || 'Camera is in use by another application'}</p>
               </div>
@@ -143,7 +151,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* State Overlay: Unsupported API */}
             {status === 'unsupported' && (
               <div className="pip-state-overlay unsupported">
-                <div className="state-icon warning">❌</div>
+                <div className="state-icon warning"><Icon name="ban" size={24} strokeWidth={1.6} /></div>
                 <p className="state-title">Unsupported Browser</p>
                 <p className="state-desc">{errorMessage || 'MediaDevices API not supported'}</p>
               </div>
@@ -152,7 +160,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* State Overlay: General Error */}
             {status === 'error' && (
               <div className="pip-state-overlay error">
-                <div className="state-icon warning">⚠️</div>
+                <div className="state-icon warning"><Icon name="alert" size={24} strokeWidth={1.6} /></div>
                 <p className="state-title">Camera Error</p>
                 <p className="state-desc">{errorMessage || 'An error occurred'}</p>
               </div>
@@ -161,7 +169,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* Live Indicator Pill (shown only when active) */}
             {isStreaming && (
               <div className="pip-live-badge" aria-label="Webcam active badge">
-                <span className="live-dot" /> LIVE (MIRRORED)
+                <span className="live-dot" /> Live · mirrored
               </div>
             )}
 
@@ -184,7 +192,7 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
             {/* Tracker initialization error overlay (if tracking fails while camera is active) */}
             {isStreaming && handTracker.status === 'error' && (
               <div className="pip-state-overlay error">
-                <div className="state-icon warning">⚠️</div>
+                <div className="state-icon warning"><Icon name="alert" size={24} strokeWidth={1.6} /></div>
                 <p className="state-title">Hand Tracker Error</p>
                 <p className="state-desc">{handTracker.errorMessage || 'Could not load hand tracking'}</p>
               </div>

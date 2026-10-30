@@ -9,6 +9,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import * as fs from "node:fs";
 import * as path from "node:path";
+// \0rolldown/runtime.js
+var __defProp = Object.defineProperty;
+var __exportAll = (all, no_symbols) => {
+	let target = {};
+	for (var name in all) __defProp(target, name, {
+		get: all[name],
+		enumerable: true
+	});
+	if (!no_symbols) __defProp(target, Symbol.toStringTag, { value: "Module" });
+	return target;
+};
 // src/types/landmarks.ts
 /**
 * Standard MediaPipe Hand 21-point topology connections:
@@ -1304,6 +1315,17 @@ var CAMERA_PRESETS = {
 	}
 };
 /**
+* Directions (from target towards camera) for side views. They keep the current target and
+* distance, so they work for any model size. A slight elevation keeps the ground grid readable.
+*/
+var SIDE_VIEW_DIRECTIONS = {
+	back: new THREE.Vector3(0, .06, -1).normalize(),
+	left: new THREE.Vector3(-1, .06, 0).normalize(),
+	right: new THREE.Vector3(1, .06, 0).normalize()
+};
+var easeInOutCubic = (t) => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+var nowMs = () => typeof performance !== "undefined" ? performance.now() : Date.now();
+/**
 * Dedicated CameraController managing OrbitControls, view presets, damping, and keyboard shortcuts.
 */
 var CameraController = class {
@@ -1313,6 +1335,7 @@ var CameraController = class {
 	activePreset = "isometric";
 	onPresetChange;
 	isInteracting = false;
+	transition = null;
 	handleKeyDownBound;
 	onControlsStartBound;
 	onControlsEndBound;
@@ -1346,6 +1369,7 @@ var CameraController = class {
 	*/
 	setPreset(preset) {
 		if (!CAMERA_PRESETS[preset]) return;
+		this.cancelTransition();
 		this.activePreset = preset;
 		this.applyPresetDirect(preset);
 		this.onPresetChange?.(preset);
@@ -1367,15 +1391,44 @@ var CameraController = class {
 	}
 	/**
 	* Toggles or sets auto-rotation.
+	* During a command transition auto-orbit is suspended; the request is remembered and
+	* applied when the transition ends, so gesture pause/restore logic stays correct.
 	*/
 	setAutoRotate(enabled) {
+		if (this.transition) {
+			this.transition.restoreAutoRotate = enabled;
+			return;
+		}
 		this.controls.autoRotate = enabled;
 	}
 	/**
-	* Gets current auto-rotate state.
+	* Gets the intended auto-rotate state (including while a transition temporarily suspends it).
 	*/
 	isAutoRotating() {
-		return this.controls.autoRotate;
+		return this.transition ? this.transition.restoreAutoRotate : this.controls.autoRotate;
+	}
+	/**
+	* Task V3: names the view the camera is actually looking from (by viewing direction, within
+	* `toleranceDeg`), or 'custom' after free orbiting. Unlike getActivePreset() this never goes
+	* stale when the user drags the camera. Uses the transition goal while a transition runs.
+	*/
+	classifyView(toleranceDeg = 10) {
+		const pose = this.getGoalPose();
+		const dir = new THREE.Vector3().subVectors(pose.position, pose.target);
+		if (dir.lengthSq() < 1e-9) return "custom";
+		dir.normalize();
+		const candidates = [...Object.keys(CAMERA_PRESETS).map((p) => [p, new THREE.Vector3().subVectors(CAMERA_PRESETS[p].position, CAMERA_PRESETS[p].target).normalize()]), ...Object.keys(SIDE_VIEW_DIRECTIONS).map((v) => [v, SIDE_VIEW_DIRECTIONS[v]])];
+		const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
+		let best = "custom";
+		let bestDot = cosTol;
+		for (const [view, v] of candidates) {
+			const d = dir.dot(v);
+			if (d >= bestDot) {
+				bestDot = d;
+				best = view;
+			}
+		}
+		return best;
 	}
 	/**
 	* Gets current active preset identifier.
@@ -1384,10 +1437,143 @@ var CameraController = class {
 		return this.activePreset;
 	}
 	/**
-	* Must be called in the render loop to update damping and auto-rotation.
+	* Must be called in the render loop to update damping, auto-rotation and any
+	* command-driven transition. `now` (ms) is injectable for deterministic tests.
 	*/
-	update() {
+	update(now = nowMs()) {
+		if (this.transition) this.stepTransition(now);
 		this.controls.update();
+	}
+	/** True while a command-driven transition is animating. */
+	isTransitioning() {
+		return this.transition !== null;
+	}
+	/**
+	* Stops a running transition where it is (the user took over) and restores auto-orbit intent.
+	*/
+	cancelTransition() {
+		if (!this.transition) return;
+		const restore = this.transition.restoreAutoRotate;
+		this.transition = null;
+		this.controls.autoRotate = restore;
+	}
+	/** The pose the camera is heading to (end of a running transition) or its current pose. */
+	getGoalPose() {
+		if (this.transition) {
+			const t = this.transition;
+			return {
+				target: t.toTarget.clone(),
+				position: new THREE.Vector3().setFromSpherical(t.toSph).add(t.toTarget)
+			};
+		}
+		return {
+			position: this.camera.position.clone(),
+			target: this.controls.target.clone()
+		};
+	}
+	/**
+	* Smoothly moves camera and target to a pose. Interpolates in spherical coordinates around the
+	* target so the camera arcs around the model instead of cutting through it. Distance and
+	* elevation are clamped to the controls' limits. durationMs <= 0 jumps immediately.
+	*/
+	animateTo(position, target, durationMs = 350, now = nowMs()) {
+		const restoreAutoRotate = this.isAutoRotating();
+		const fromTarget = this.controls.target.clone();
+		const fromSph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(this.camera.position, fromTarget));
+		const toSph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(position, target));
+		toSph.radius = THREE.MathUtils.clamp(toSph.radius, this.controls.minDistance, this.controls.maxDistance);
+		toSph.phi = THREE.MathUtils.clamp(toSph.phi, 1e-4, this.controls.maxPolarAngle);
+		let dTheta = toSph.theta - fromSph.theta;
+		dTheta = Math.atan2(Math.sin(dTheta), Math.cos(dTheta));
+		toSph.theta = fromSph.theta + dTheta;
+		this.controls.autoRotate = false;
+		this.transition = {
+			startMs: now,
+			durationMs: Math.max(0, durationMs),
+			fromTarget,
+			toTarget: target.clone(),
+			fromSph,
+			toSph,
+			restoreAutoRotate
+		};
+		if (durationMs <= 0) this.stepTransition(now);
+	}
+	stepTransition(now) {
+		const t = this.transition;
+		if (!t) return;
+		const raw = t.durationMs === 0 ? 1 : THREE.MathUtils.clamp((now - t.startMs) / t.durationMs, 0, 1);
+		const e = easeInOutCubic(raw);
+		this.controls.target.lerpVectors(t.fromTarget, t.toTarget, e);
+		const sph = new THREE.Spherical(THREE.MathUtils.lerp(t.fromSph.radius, t.toSph.radius, e), THREE.MathUtils.lerp(t.fromSph.phi, t.toSph.phi, e), THREE.MathUtils.lerp(t.fromSph.theta, t.toSph.theta, e));
+		this.camera.position.setFromSpherical(sph).add(this.controls.target);
+		this.camera.lookAt(this.controls.target);
+		if (raw >= 1) {
+			this.transition = null;
+			this.controls.autoRotate = t.restoreAutoRotate;
+		}
+	}
+	/** Orbits around the target. Positive yaw orbits counter-clockwise seen from above;
+	*  positive pitch raises the camera. Builds on the goal pose so repeated commands accumulate. */
+	orbitBy(yawRad, pitchRad, durationMs = 350, now = nowMs()) {
+		const goal = this.getGoalPose();
+		const sph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(goal.position, goal.target));
+		sph.theta += yawRad;
+		sph.phi = THREE.MathUtils.clamp(sph.phi - pitchRad, .05, this.controls.maxPolarAngle);
+		this.animateTo(new THREE.Vector3().setFromSpherical(sph).add(goal.target), goal.target, durationMs, now);
+	}
+	/** Slides camera and target together in screen space. Amounts are fractions of the viewing
+	*  distance (+right, +up). The target is kept within reach of the model. */
+	panBy(rightFraction, upFraction, durationMs = 350, now = nowMs()) {
+		const goal = this.getGoalPose();
+		const offset = new THREE.Vector3().subVectors(goal.position, goal.target);
+		const dist = offset.length();
+		const forward = offset.clone().negate().normalize();
+		const right = new THREE.Vector3().crossVectors(forward, this.camera.up).normalize();
+		if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+		const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+		const delta = right.multiplyScalar(rightFraction * dist).add(up.multiplyScalar(upFraction * dist));
+		const newTarget = goal.target.clone().add(delta);
+		const limit = this.controls.maxDistance * .4;
+		if (newTarget.length() > limit) newTarget.setLength(limit);
+		this.animateTo(newTarget.clone().add(offset), newTarget, durationMs, now);
+	}
+	/** Multiplies the viewing distance by `factor` (< 1 zooms in), clamped to the limits. */
+	zoomSmooth(factor, durationMs = 350, now = nowMs()) {
+		const goal = this.getGoalPose();
+		const offset = new THREE.Vector3().subVectors(goal.position, goal.target);
+		offset.setLength(THREE.MathUtils.clamp(offset.length() * factor, this.controls.minDistance, this.controls.maxDistance));
+		this.animateTo(goal.target.clone().add(offset), goal.target, durationMs, now);
+	}
+	/** Smoothly moves to a named view. Presets use their fixed poses (as the toolbar does);
+	*  back/left/right keep the current target and distance. */
+	goToView(view, durationMs = 350, now = nowMs()) {
+		if (view === "isometric" || view === "top" || view === "front") {
+			const config = CAMERA_PRESETS[view];
+			this.activePreset = view;
+			this.animateTo(config.position, config.target, durationMs, now);
+		} else {
+			const goal = this.getGoalPose();
+			const dist = goal.position.distanceTo(goal.target);
+			const position = goal.target.clone().addScaledVector(SIDE_VIEW_DIRECTIONS[view], dist);
+			this.animateTo(position, goal.target, durationMs, now);
+		}
+		this.onPresetChange?.(view);
+	}
+	/** Pose that frames a bounding box (same framing maths as focusOnBounds). */
+	getFocusPose(box, offsetRatio = 1.6) {
+		if (box.isEmpty()) return null;
+		const center = box.getCenter(new THREE.Vector3());
+		const size = box.getSize(new THREE.Vector3());
+		const maxDim = Math.max(size.x, size.y, size.z, .1);
+		const fovRad = this.camera.fov * Math.PI / 180;
+		const cameraDistance = THREE.MathUtils.clamp(maxDim / 2 / Math.tan(fovRad / 2) * offsetRatio, this.controls.minDistance, this.controls.maxDistance);
+		const goal = this.getGoalPose();
+		const direction = new THREE.Vector3().subVectors(goal.position, goal.target).normalize();
+		if (direction.lengthSq() < 1e-4) direction.set(.7, .5, .7).normalize();
+		return {
+			target: center,
+			position: center.clone().addScaledVector(direction, cameraDistance)
+		};
 	}
 	/**
 	* Adjusts the camera distance relative to controls.target by delta.
@@ -2201,6 +2387,13 @@ var GestureCameraController = class {
 		};
 	}
 	/**
+	* True while a hand gesture is actively steering the camera (orbit or pinch-zoom).
+	* Used by the scene command executor to defer camera commands instead of fighting the hand.
+	*/
+	isInteracting() {
+		return this.isGestureInteracting;
+	}
+	/**
 	* Resets both orbit and pinch tracking states and restores auto-rotation if active.
 	*/
 	reset() {
@@ -2725,7 +2918,7 @@ describe("GesturePinchZoomEngine (Task 4.2 Math & Interaction)", () => {
 		assert.equal(engine.isSessionActive(), false);
 	});
 });
-function createMockDom$1() {
+function createMockDom$3() {
 	const doc = {
 		addEventListener: () => {},
 		removeEventListener: () => {}
@@ -2742,7 +2935,7 @@ describe("CameraController Clamping (Min & Max Distance)", () => {
 	it("clamps camera zoom distance to safe minimum limit", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const controller = new CameraController(camera, createMockDom$1(), {
+		const controller = new CameraController(camera, createMockDom$3(), {
 			minDistance: 2,
 			maxDistance: 25,
 			enableDamping: false
@@ -2757,7 +2950,7 @@ describe("CameraController Clamping (Min & Max Distance)", () => {
 	it("clamps camera zoom distance to safe maximum limit", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const controller = new CameraController(camera, createMockDom$1(), {
+		const controller = new CameraController(camera, createMockDom$3(), {
 			minDistance: 2,
 			maxDistance: 25,
 			enableDamping: false
@@ -3085,7 +3278,9 @@ var DEFAULT_RAYCASTER_OPTIONS = {
 	hoverColor: 440020,
 	hoverIntensity: .55,
 	selectedColor: 16096779,
-	selectedIntensity: .85
+	selectedIntensity: .85,
+	relatedColor: 2278750,
+	relatedIntensity: .5
 };
 /**
 * Manages 3D screen-space raycasting and non-destructive component highlighting.
@@ -3097,6 +3292,8 @@ var ComponentRaycaster = class {
 	options;
 	activeHoveredId = null;
 	activeSelectedId = null;
+	/** Task V3: components highlighted together (e.g. parts connected to the selected one). */
+	relatedIds = /* @__PURE__ */ new Set();
 	validator;
 	highlightedMeshes = /* @__PURE__ */ new Set();
 	constructor(camera, rootObject, options = {}) {
@@ -3138,9 +3335,10 @@ var ComponentRaycaster = class {
 	*/
 	setHoverHighlight(componentId) {
 		if (this.activeHoveredId === componentId) return;
-		if (this.activeHoveredId && this.activeHoveredId !== this.activeSelectedId) this.clearComponentHighlight(this.activeHoveredId);
+		const previous = this.activeHoveredId;
 		this.activeHoveredId = componentId;
-		if (componentId && componentId !== this.activeSelectedId) this.applyComponentHighlight(componentId, this.options.hoverColor, this.options.hoverIntensity);
+		if (previous) this.refreshComponent(previous);
+		if (componentId) this.refreshComponent(componentId);
 	}
 	/**
 	* Applies persistent selection highlighting to the specified component ID.
@@ -3148,13 +3346,31 @@ var ComponentRaycaster = class {
 	*/
 	setSelectionHighlight(componentId) {
 		if (this.activeSelectedId === componentId) return;
-		if (this.activeSelectedId) this.clearComponentHighlight(this.activeSelectedId);
+		const previous = this.activeSelectedId;
 		this.activeSelectedId = componentId;
-		if (!componentId) {
-			if (this.activeHoveredId) this.applyComponentHighlight(this.activeHoveredId, this.options.hoverColor, this.options.hoverIntensity);
-			return;
-		}
-		this.applyComponentHighlight(componentId, this.options.selectedColor, this.options.selectedIntensity);
+		if (previous) this.refreshComponent(previous);
+		if (componentId) this.refreshComponent(componentId);
+	}
+	/**
+	* Task V3: highlights several components together (a third, lower-priority layer:
+	* selection > hover > related). Passing an empty list clears it, restoring each component's
+	* previous highlight (selection/hover) or its original material.
+	*/
+	setRelatedHighlight(componentIds) {
+		const next = new Set(componentIds);
+		const changed = /* @__PURE__ */ new Set([...this.relatedIds, ...next]);
+		this.relatedIds = next;
+		for (const id of changed) this.refreshComponent(id);
+	}
+	getRelatedHighlightIds() {
+		return [...this.relatedIds];
+	}
+	/** Re-applies the highest-priority highlight layer for one component (or restores it). */
+	refreshComponent(componentId) {
+		this.clearComponentHighlight(componentId);
+		if (componentId === this.activeSelectedId) this.applyComponentHighlight(componentId, this.options.selectedColor, this.options.selectedIntensity);
+		else if (componentId === this.activeHoveredId) this.applyComponentHighlight(componentId, this.options.hoverColor, this.options.hoverIntensity);
+		else if (this.relatedIds.has(componentId)) this.applyComponentHighlight(componentId, this.options.relatedColor, this.options.relatedIntensity);
 	}
 	/**
 	* Applies an emissive highlight color to all meshes belonging to a component ID.
@@ -3209,6 +3425,7 @@ var ComponentRaycaster = class {
 		this.highlightedMeshes.clear();
 		this.activeHoveredId = null;
 		this.activeSelectedId = null;
+		this.relatedIds.clear();
 	}
 	getActiveHoveredId() {
 		return this.activeHoveredId;
@@ -4201,7 +4418,7 @@ describe("Simulated Camera Acquisition & Lifecycle Workflows", () => {
 /**
 * Creates a complete mock DOM element suitable for Three.js OrbitControls in Node.js.
 */
-function createMockDom() {
+function createMockDom$2() {
 	const doc = {
 		addEventListener: () => {},
 		removeEventListener: () => {}
@@ -4289,7 +4506,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("drives orbital rotation across sequential OPEN_PALM frames without snapping", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), { enableDamping: false });
+		const cameraController = new CameraController(camera, createMockDom$2(), { enableDamping: false });
 		const gestureController = new GestureCameraController(cameraController);
 		const initialPos = camera.position.clone();
 		const hand0 = wrapHandsResult(createSyntheticHand({
@@ -4321,7 +4538,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("drives smooth camera zoom across sequential PINCH frames", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), {
+		const cameraController = new CameraController(camera, createMockDom$2(), {
 			minDistance: 2,
 			maxDistance: 25,
 			enableDamping: false
@@ -4376,7 +4593,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("switches between OPEN_PALM, PINCH, and POINTING without simultaneous conflicting actions", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), { enableDamping: false });
+		const cameraController = new CameraController(camera, createMockDom$2(), { enableDamping: false });
 		const gestureController = new GestureCameraController(cameraController);
 		const hand = wrapHandsResult(createSyntheticHand({
 			x: .5,
@@ -4420,7 +4637,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("safely handles tracking loss and hand re-entry without camera snapping", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), { enableDamping: false });
+		const cameraController = new CameraController(camera, createMockDom$2(), { enableDamping: false });
 		const gestureController = new GestureCameraController(cameraController);
 		const palmGesture = {
 			gesture: "OPEN_PALM",
@@ -4451,7 +4668,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("clamps zoom to configured minimum and maximum limits under sustained deltas", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), {
+		const cameraController = new CameraController(camera, createMockDom$2(), {
 			minDistance: 2,
 			maxDistance: 25,
 			enableDamping: false
@@ -4465,7 +4682,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("yields immediately when user mouse interaction is active on OrbitControls", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), { enableDamping: false });
+		const cameraController = new CameraController(camera, createMockDom$2(), { enableDamping: false });
 		const gestureController = new GestureCameraController(cameraController);
 		const hand = wrapHandsResult(createSyntheticHand({
 			x: .5,
@@ -4487,7 +4704,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("safely handles hand disappearance and re-entry during pinch-to-zoom without camera snapping", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), { enableDamping: false });
+		const cameraController = new CameraController(camera, createMockDom$2(), { enableDamping: false });
 		const gestureController = new GestureCameraController(cameraController);
 		const pinchGesture = {
 			gesture: "PINCH",
@@ -4552,7 +4769,7 @@ describe("Synthetic Multi-Frame Gesture Stream Integration", () => {
 	it("safely handles degenerate or out-of-bounds landmarks without throwing or applying camera deltas", () => {
 		const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
 		camera.position.set(0, 0, 10);
-		const cameraController = new CameraController(camera, createMockDom(), { enableDamping: false });
+		const cameraController = new CameraController(camera, createMockDom$2(), { enableDamping: false });
 		const gestureController = new GestureCameraController(cameraController);
 		const palmGesture = {
 			gesture: "OPEN_PALM",
@@ -5806,6 +6023,88 @@ function buildPlanetaryGearbox() {
 		dispose
 	};
 }
+// src/services/scene/relationshipTable.ts
+/** Relationship types used by the current models, with their inverses. Domains use their own subset. */
+var INVERSE_RELATIONSHIP = {
+	drives: "driven_by",
+	driven_by: "drives",
+	mates_with: "mates_with",
+	supports: "supported_by",
+	supported_by: "supports",
+	connected_to: "connected_to",
+	fastened_to: "fastened_to",
+	transfers_force_to: "receives_force_from",
+	receives_force_from: "transfers_force_to"
+};
+/** Expands directed edges into per-component relationship lists (both directions). */
+function buildRelationshipIndex(edges) {
+	const index = /* @__PURE__ */ new Map();
+	const add = (id, rel) => {
+		const list = index.get(id) ?? [];
+		list.push(rel);
+		index.set(id, list);
+	};
+	for (const e of edges) {
+		add(e.from, {
+			targetComponentId: e.to,
+			relationshipType: e.type,
+			description: e.description
+		});
+		add(e.to, {
+			targetComponentId: e.from,
+			relationshipType: INVERSE_RELATIONSHIP[e.type],
+			description: e.description
+		});
+	}
+	return index;
+}
+var PLANETARY_GEARBOX_RELATIONSHIPS = buildRelationshipIndex([{
+	from: "central_shaft",
+	type: "drives",
+	to: "sun_gear",
+	description: "The drive shaft turns the sun gear through a keyway.",
+	evidence: "central_shaft note \"Transfers high-speed motor rotation to central sun gear via precision keyway\"; animation sets shaft angle = sun angle."
+}, ...[
+	"planet_gear_1",
+	"planet_gear_2",
+	"planet_gear_3"
+].flatMap((planet) => [
+	{
+		from: "sun_gear",
+		type: "mates_with",
+		to: planet,
+		description: "Sun gear teeth mesh with this planet gear.",
+		evidence: "sun_gear note \"Meshes simultaneously with three planet gears\"; geometry orbit radius = sun radius + planet radius."
+	},
+	{
+		from: "sun_gear",
+		type: "drives",
+		to: planet,
+		description: "The sun gear (input) drives the planet gear.",
+		evidence: "animation gear_train_rotation: \"Sun gear (input) drives the planet gears\"."
+	},
+	{
+		from: planet,
+		type: "mates_with",
+		to: "ring_gear",
+		description: "The planet gear rolls inside the fixed ring gear.",
+		evidence: "animation: planets \"roll inside the fixed ring gear\"; planet note \"...to the outer reaction ring\"; geometry ring inner radius = sun + 2 x planet radius."
+	},
+	{
+		from: "planet_carrier",
+		type: "supports",
+		to: planet,
+		description: "The planet gear turns on one of the carrier pins.",
+		evidence: "planet note \"Mounted on hardened cantilever carrier pin\"; geometry places planets at the carrier pin positions."
+	},
+	{
+		from: planet,
+		type: "drives",
+		to: "planet_carrier",
+		description: "Orbiting planet gears turn the carrier (the output).",
+		evidence: "animation: planets \"turn the planet carrier (output)\"; carrier note \"Gathers orbital motion from the three planet gears\"."
+	}
+])]);
 // src/models/mechanical/planetaryGearboxModel.ts
 var PLANETARY_GEARBOX_MODEL_ID = "planetary_gearbox";
 /**
@@ -5904,9 +6203,11 @@ function getPlanetaryGearboxAssemblyTree() {
 function getPlanetaryGearboxComponentMetadata(componentId) {
 	const existing = getComponentMetadata(componentId);
 	if (!existing) return null;
+	const relationships = PLANETARY_GEARBOX_RELATIONSHIPS.get(componentId);
 	return {
 		...existing,
-		domain: "mechanical"
+		domain: "mechanical",
+		...relationships ? { relationships: [...relationships] } : {}
 	};
 }
 /**
@@ -5944,6 +6245,11 @@ var planetaryGearboxModel = {
 		fov: 45,
 		defaultPreset: "isometric"
 	},
+	animations: [{
+		id: "gear_train_rotation",
+		label: "Epicyclic gear train in motion",
+		description: "Sun gear (input) drives the planet gears, which roll inside the fixed ring gear and turn the planet carrier (output) at a reduced speed."
+	}],
 	getAssemblyTree: getPlanetaryGearboxAssemblyTree,
 	getComponentMetadata: getPlanetaryGearboxComponentMetadata,
 	getAllComponentIds: () => [...PLANETARY_GEARBOX_COMPONENT_IDS],
@@ -6336,6 +6642,75 @@ function buildWarrenTrussBridge() {
 		}
 	};
 }
+var WARREN_TRUSS_RELATIONSHIPS = buildRelationshipIndex([
+	{
+		from: "diagonal_members",
+		type: "connected_to",
+		to: "top_chords",
+		description: "Diagonals connect the top chord to the bottom chord.",
+		evidence: "diagonal_members description \"connecting top and bottom chords\"."
+	},
+	{
+		from: "diagonal_members",
+		type: "connected_to",
+		to: "bottom_chords",
+		description: "Diagonals connect the top chord to the bottom chord.",
+		evidence: "diagonal_members description \"connecting top and bottom chords\"."
+	},
+	...[
+		"top_chords",
+		"bottom_chords",
+		"diagonal_members"
+	].map((member) => ({
+		from: "gusset_plates",
+		type: "fastened_to",
+		to: member,
+		description: "Gusset plates are bolted to the members meeting at each truss joint.",
+		evidence: "gusset_plates description \"fastened with high-strength structural bolts at chord-web node intersections\"; geometry places plates at the top and bottom panel points."
+	})),
+	{
+		from: "vertical_struts",
+		type: "fastened_to",
+		to: "gusset_plates",
+		description: "Vertical hangers are bolted to the gusset plates.",
+		evidence: "vertical_struts specification \"Joint Fasteners: Double-Shear Gusset Bolting\"."
+	},
+	{
+		from: "vertical_struts",
+		type: "transfers_force_to",
+		to: "top_chords",
+		description: "Hangers carry floor-beam (deck) reactions up into the top chord panel points.",
+		evidence: "vertical_struts note \"Hangers transfer floor beam deck reactions directly into top chord panel points\"."
+	},
+	{
+		from: "vertical_struts",
+		type: "supports",
+		to: "bridge_deck",
+		description: "Hangers hang the deck from the top chord joints.",
+		evidence: "vertical_struts description \"hang the deck from the top chord joints\"."
+	},
+	{
+		from: "bottom_chords",
+		type: "supports",
+		to: "bridge_deck",
+		description: "The transverse floor beams (part of the bottom-chord system) carry the deck stringers.",
+		evidence: "bottom_chords description \"supporting transverse floor beams\"; deck note \"Deck Slab -> Stringers -> Floor Beams -> Truss Nodes\"; geometry builds the floor beams in the bottom_chords group."
+	},
+	{
+		from: "end_portals",
+		type: "transfers_force_to",
+		to: "support_piers",
+		description: "End portals carry lateral (wind) loads down to the bearing seats.",
+		evidence: "end_portals note \"transferring top lateral wind reactions down to bearing seats\"; spec \"Channels Upper Lateral Shear to Abutments\"."
+	},
+	{
+		from: "support_piers",
+		type: "supports",
+		to: "bottom_chords",
+		description: "Bearings on the abutments carry the truss at the ends of the bottom chords.",
+		evidence: "geometry places the elastomeric bearings under each truss shoe at the bottom-chord ends; support_piers description \"support reactions\"."
+	}
+]);
 // src/models/civil/warrenTrussBridgeModel.ts
 var WARREN_TRUSS_MODEL_ID = "warren_truss_bridge";
 /**
@@ -6711,7 +7086,12 @@ var CIVIL_BRIDGE_METADATA = {
 */
 function getWarrenTrussComponentMetadata(componentId) {
 	const metadata = CIVIL_BRIDGE_METADATA[componentId];
-	return metadata ? { ...metadata } : null;
+	if (!metadata) return null;
+	const relationships = WARREN_TRUSS_RELATIONSHIPS.get(componentId);
+	return relationships ? {
+		...metadata,
+		relationships: [...relationships]
+	} : { ...metadata };
 }
 /**
 * Standardized EngineeringModelDefinition for the Civil Warren Truss Bridge
@@ -7119,13 +7499,31 @@ var ModelLifecycleManager = class {
 			this.activeRuntime.isolateComponent(componentId);
 			return true;
 		}
-		if (componentId) this.activeRuntime.rootGroup.traverse((obj) => {
+		const validIds = new Set(this.activeModel?.getAllComponentIds() ?? []);
+		const resolve = (obj) => {
 			const compId = obj.userData?.componentId || obj.name;
-			if (typeof compId === "string" && compId.length > 0) obj.visible = compId === componentId;
-		});
-		else this.activeRuntime.rootGroup.traverse((obj) => {
-			const compId = obj.userData?.componentId || obj.name;
-			if (typeof compId === "string" && compId.length > 0) obj.visible = !this.hiddenComponentIds.has(compId);
+			return typeof compId === "string" && validIds.has(compId) ? compId : null;
+		};
+		const root = this.activeRuntime.rootGroup;
+		if (componentId) {
+			const isolatedObjects = [];
+			root.traverse((obj) => {
+				const compId = resolve(obj);
+				if (compId) {
+					obj.visible = compId === componentId;
+					if (compId === componentId) isolatedObjects.push(obj);
+				}
+			});
+			for (const obj of isolatedObjects) {
+				let parent = obj.parent;
+				while (parent && parent !== root.parent) {
+					parent.visible = true;
+					parent = parent.parent;
+				}
+			}
+		} else root.traverse((obj) => {
+			const compId = resolve(obj);
+			if (compId) obj.visible = !this.hiddenComponentIds.has(compId);
 		});
 		return true;
 	}
@@ -7134,6 +7532,21 @@ var ModelLifecycleManager = class {
 	*/
 	getIsolatedComponentId() {
 		return this.isolatedComponentId;
+	}
+	/**
+	* World-space bounding box of a component's meshes, or null if it has none in the active model.
+	*/
+	getComponentBounds(componentId) {
+		if (!this.activeRuntime) return null;
+		const box = new THREE.Box3();
+		let found = false;
+		this.activeRuntime.rootGroup.traverse((obj) => {
+			if ((obj.userData?.componentId || obj.name) === componentId && obj.isMesh) {
+				box.expandByObject(obj);
+				found = true;
+			}
+		});
+		return found && !box.isEmpty() ? box : null;
 	}
 	/**
 	* Focuses the camera on the 3D bounding box of the specified component.
@@ -8092,6 +8505,530 @@ var AssemblyTreePanel = ({ rootNode, selectedComponentId, onSelectComponent, hid
 		]
 	});
 };
+// src/services/commands/sceneCommands.ts
+/** Views the camera can move to. "bottom" is intentionally absent: the camera is
+*  constrained above the ground grid (OrbitControls maxPolarAngle), so it is unsupported. */
+var CAMERA_VIEWS = [
+	"isometric",
+	"top",
+	"front",
+	"back",
+	"left",
+	"right"
+];
+var PAN_DIRECTIONS = [
+	"left",
+	"right",
+	"up",
+	"down"
+];
+/** Commands that move the camera. They are deferred while a hand or the mouse is steering it. */
+var CAMERA_MOTION_TYPES = /* @__PURE__ */ new Set([
+	"camera.orbit",
+	"camera.pan",
+	"camera.zoom",
+	"camera.view",
+	"camera.reset",
+	"component.focus"
+]);
+var ALL_COMMAND_TYPES = /* @__PURE__ */ new Set([
+	"camera.orbit",
+	"camera.pan",
+	"camera.zoom",
+	"camera.view",
+	"camera.reset",
+	"camera.autoOrbit",
+	"component.select",
+	"component.focus",
+	"component.isolate",
+	"component.visibility",
+	"component.showAll",
+	"component.highlight",
+	"component.clearHighlight",
+	"assembly.explode",
+	"assembly.restore",
+	"animation.play",
+	"animation.pause",
+	"animation.setSpeed",
+	"lesson.start",
+	"lesson.next",
+	"lesson.previous",
+	"lesson.goTo",
+	"lesson.exit",
+	"workspace.switchModel",
+	"workspace.goHome"
+]);
+var EMPTY_COMMAND_CONTEXT = {
+	modelId: null,
+	componentIds: /* @__PURE__ */ new Set(),
+	animationIds: [],
+	supportsExplodedView: false,
+	viewerReady: false,
+	lesson: {
+		available: false,
+		active: false,
+		stepCount: 0,
+		currentStep: 0
+	},
+	registeredModelIds: /* @__PURE__ */ new Set(),
+	selectedComponentId: null
+};
+var LIMITS = {
+	orbitDeg: 180,
+	pitchDeg: 80,
+	panAmountMax: 1,
+	panAmountDefault: .15,
+	zoomStepsMax: 5,
+	speedMin: .1,
+	speedMax: 3,
+	highlightMax: 20
+};
+var reject = (code, reason) => ({
+	ok: false,
+	code,
+	reason
+});
+var isNum = (v) => typeof v === "number" && Number.isFinite(v);
+var isStr = (v) => typeof v === "string" && v.trim().length > 0;
+function checkComponent(id, ctx) {
+	if (!isStr(id)) return reject("INVALID_ARGUMENT", "componentId must be a non-empty string.");
+	if (!ctx.componentIds.has(id)) return reject("UNKNOWN_COMPONENT", `Component "${id}" does not exist in model "${ctx.modelId ?? "none"}".`);
+	return null;
+}
+/**
+* Validates and normalises a command against the current scene context.
+* Returns a clean, fully-typed command (defaults filled in) or a rejection with a reason.
+*/
+function validateSceneCommand(input, ctx) {
+	if (typeof input !== "object" || input === null || Array.isArray(input)) return reject("MALFORMED", "Command must be an object.");
+	const c = input;
+	if (typeof c.type !== "string") return reject("MALFORMED", "Command is missing a \"type\".");
+	const type = c.type;
+	if (!ALL_COMMAND_TYPES.has(type)) return reject("UNKNOWN_COMMAND", `Unknown command "${c.type}".`);
+	if ((type.startsWith("camera.") || type.startsWith("animation.") || type === "component.focus" || type === "component.isolate" || type === "component.highlight" || type === "component.clearHighlight") && !ctx.viewerReady) return reject("VIEWER_NOT_READY", "The 3D viewer is not ready.");
+	switch (type) {
+		case "camera.orbit": {
+			const yawDeg = c.yawDeg ?? 0;
+			const pitchDeg = c.pitchDeg ?? 0;
+			if (!isNum(yawDeg) || !isNum(pitchDeg)) return reject("INVALID_ARGUMENT", "yawDeg/pitchDeg must be numbers.");
+			if (Math.abs(yawDeg) > LIMITS.orbitDeg || Math.abs(pitchDeg) > LIMITS.pitchDeg) return reject("INVALID_ARGUMENT", `Orbit limited to ±${LIMITS.orbitDeg}° yaw and ±${LIMITS.pitchDeg}° pitch.`);
+			if (yawDeg === 0 && pitchDeg === 0) return reject("INVALID_ARGUMENT", "Orbit needs a non-zero yaw or pitch.");
+			return {
+				ok: true,
+				command: {
+					type,
+					yawDeg,
+					pitchDeg
+				}
+			};
+		}
+		case "camera.pan": {
+			if (!PAN_DIRECTIONS.includes(c.direction)) return reject("INVALID_ARGUMENT", `Pan direction must be one of ${PAN_DIRECTIONS.join(", ")}.`);
+			const amount = c.amount ?? LIMITS.panAmountDefault;
+			if (!isNum(amount) || amount <= 0 || amount > LIMITS.panAmountMax) return reject("INVALID_ARGUMENT", `Pan amount must be in (0, ${LIMITS.panAmountMax}].`);
+			return {
+				ok: true,
+				command: {
+					type,
+					direction: c.direction,
+					amount
+				}
+			};
+		}
+		case "camera.zoom": {
+			if (c.direction !== "in" && c.direction !== "out") return reject("INVALID_ARGUMENT", "Zoom direction must be \"in\" or \"out\".");
+			const steps = c.steps ?? 1;
+			if (!Number.isInteger(steps) || steps < 1 || steps > LIMITS.zoomStepsMax) return reject("INVALID_ARGUMENT", `Zoom steps must be an integer 1–${LIMITS.zoomStepsMax}.`);
+			return {
+				ok: true,
+				command: {
+					type,
+					direction: c.direction,
+					steps
+				}
+			};
+		}
+		case "camera.view":
+			if (c.view === "bottom") return reject("INVALID_ARGUMENT", "Bottom view is not supported: the camera is kept above the ground grid.");
+			if (!CAMERA_VIEWS.includes(c.view)) return reject("INVALID_ARGUMENT", `View must be one of ${CAMERA_VIEWS.join(", ")}.`);
+			return {
+				ok: true,
+				command: {
+					type,
+					view: c.view
+				}
+			};
+		case "camera.reset": return {
+			ok: true,
+			command: { type }
+		};
+		case "camera.autoOrbit":
+			if (typeof c.enabled !== "boolean") return reject("INVALID_ARGUMENT", "\"enabled\" must be true or false.");
+			return {
+				ok: true,
+				command: {
+					type,
+					enabled: c.enabled
+				}
+			};
+		case "component.select":
+			if (c.componentId === null) return {
+				ok: true,
+				command: {
+					type,
+					componentId: null
+				}
+			};
+			return checkComponent(c.componentId, ctx) ?? {
+				ok: true,
+				command: {
+					type,
+					componentId: c.componentId
+				}
+			};
+		case "component.focus": return checkComponent(c.componentId, ctx) ?? {
+			ok: true,
+			command: {
+				type,
+				componentId: c.componentId
+			}
+		};
+		case "component.isolate":
+			if (c.componentId === null) return {
+				ok: true,
+				command: {
+					type,
+					componentId: null
+				}
+			};
+			return checkComponent(c.componentId, ctx) ?? {
+				ok: true,
+				command: {
+					type,
+					componentId: c.componentId
+				}
+			};
+		case "component.visibility":
+			if (!Array.isArray(c.componentIds) || c.componentIds.length === 0) return reject("INVALID_ARGUMENT", "componentIds must be a non-empty array.");
+			if (typeof c.visible !== "boolean") return reject("INVALID_ARGUMENT", "\"visible\" must be true or false.");
+			for (const id of c.componentIds) {
+				const bad = checkComponent(id, ctx);
+				if (bad) return bad;
+			}
+			return {
+				ok: true,
+				command: {
+					type,
+					componentIds: [...new Set(c.componentIds)],
+					visible: c.visible
+				}
+			};
+		case "component.showAll": return {
+			ok: true,
+			command: { type }
+		};
+		case "component.highlight":
+			if (!Array.isArray(c.componentIds) || c.componentIds.length === 0) return reject("INVALID_ARGUMENT", "componentIds must be a non-empty array.");
+			if (c.componentIds.length > LIMITS.highlightMax) return reject("INVALID_ARGUMENT", `At most ${LIMITS.highlightMax} components can be highlighted.`);
+			for (const id of c.componentIds) {
+				const bad = checkComponent(id, ctx);
+				if (bad) return bad;
+			}
+			return {
+				ok: true,
+				command: {
+					type,
+					componentIds: [...new Set(c.componentIds)]
+				}
+			};
+		case "component.clearHighlight": return {
+			ok: true,
+			command: { type }
+		};
+		case "assembly.explode":
+			if (!ctx.supportsExplodedView) return reject("UNSUPPORTED_EXPLODED_VIEW", "This model has no exploded view.");
+			if (!isNum(c.factor) || c.factor < 0 || c.factor > 1) return reject("INVALID_ARGUMENT", "Explode factor must be between 0 and 1.");
+			return {
+				ok: true,
+				command: {
+					type,
+					factor: c.factor
+				}
+			};
+		case "assembly.restore":
+			if (!ctx.supportsExplodedView) return reject("UNSUPPORTED_EXPLODED_VIEW", "This model has no exploded view.");
+			return {
+				ok: true,
+				command: { type }
+			};
+		case "animation.play":
+		case "animation.pause":
+			if (ctx.animationIds.length === 0) return reject("UNSUPPORTED_ANIMATION", `Model "${ctx.modelId ?? "none"}" has no playable animation.`);
+			return {
+				ok: true,
+				command: { type }
+			};
+		case "animation.setSpeed":
+			if (ctx.animationIds.length === 0) return reject("UNSUPPORTED_ANIMATION", `Model "${ctx.modelId ?? "none"}" has no playable animation.`);
+			if (!isNum(c.speed) || c.speed < LIMITS.speedMin || c.speed > LIMITS.speedMax) return reject("INVALID_ARGUMENT", `Speed must be between ${LIMITS.speedMin} and ${LIMITS.speedMax}.`);
+			return {
+				ok: true,
+				command: {
+					type,
+					speed: c.speed
+				}
+			};
+		case "lesson.start":
+			if (!ctx.lesson.available) return reject("NO_LESSON", "No guided lesson exists for this model.");
+			return {
+				ok: true,
+				command: { type }
+			};
+		case "lesson.next":
+		case "lesson.previous":
+		case "lesson.exit":
+			if (!ctx.lesson.active) return reject("LESSON_NOT_ACTIVE", "No guided lesson is running.");
+			return {
+				ok: true,
+				command: { type }
+			};
+		case "lesson.goTo":
+			if (!ctx.lesson.active) return reject("LESSON_NOT_ACTIVE", "No guided lesson is running.");
+			if (!Number.isInteger(c.stepIndex) || c.stepIndex < 0 || c.stepIndex >= ctx.lesson.stepCount) return reject("INVALID_ARGUMENT", `Lesson step must be 0–${ctx.lesson.stepCount - 1}.`);
+			return {
+				ok: true,
+				command: {
+					type,
+					stepIndex: c.stepIndex
+				}
+			};
+		case "workspace.switchModel":
+			if (!isStr(c.modelId) || !ctx.registeredModelIds.has(c.modelId)) return reject("UNKNOWN_MODEL", `Model "${String(c.modelId)}" is not registered.`);
+			return {
+				ok: true,
+				command: {
+					type,
+					modelId: c.modelId
+				}
+			};
+		case "workspace.goHome": return {
+			ok: true,
+			command: { type }
+		};
+	}
+	return reject("UNKNOWN_COMMAND", `Unknown command "${c.type}".`);
+}
+// src/services/commands/viewerCommandExecutor.ts
+/**
+* Viewer Command Executor (Task V1)
+*
+* Executes the scene commands that act on the Three.js viewer itself: camera motion, component
+* focus/isolation and model animation. Workspace-state commands (selection, visibility, explode,
+* lessons, navigation) are handled by the workspace layer.
+*
+* Arbitration with hands and mouse (the user always wins):
+*  - A camera command arriving while a gesture or mouse drag is steering the camera is DEFERRED
+*    (latest one wins) and runs as soon as the hand/mouse lets go, or expires after PENDING_TTL_MS.
+*  - If a gesture or drag starts while a command transition is animating, the transition is
+*    cancelled on that frame, leaving the camera where the user took it.
+*/
+var PENDING_TTL_MS = 2500;
+var ZOOM_STEP_FACTOR = .75;
+var VIEWER_TYPES = /* @__PURE__ */ new Set([
+	"camera.orbit",
+	"camera.pan",
+	"camera.zoom",
+	"camera.view",
+	"camera.reset",
+	"camera.autoOrbit",
+	"component.focus",
+	"component.isolate",
+	"component.highlight",
+	"component.clearHighlight",
+	"animation.play",
+	"animation.pause",
+	"animation.setSpeed"
+]);
+var ViewerCommandExecutor = class {
+	id = "viewer";
+	pending = null;
+	/** Last command-driven focus; cleared when the camera is moved by anything else. */
+	focused = null;
+	target;
+	onDeferredOutcome;
+	now;
+	constructor(target, onDeferredOutcome) {
+		this.target = target;
+		this.onDeferredOutcome = onDeferredOutcome;
+		this.now = target.now ?? (() => typeof performance !== "undefined" ? performance.now() : Date.now());
+	}
+	canHandle(type) {
+		return VIEWER_TYPES.has(type);
+	}
+	/** True while a hand gesture or mouse drag is steering the camera. */
+	isUserSteering() {
+		return this.target.isGestureInteracting() || this.target.camera.isUserInteracting();
+	}
+	getPending() {
+		return this.pending?.command ?? null;
+	}
+	/** Live facts the viewer knows best, merged into the dispatcher context. */
+	contextProvider = () => {
+		const runtime = this.target.lifecycle.getActiveRuntime();
+		return {
+			viewerReady: Boolean(this.target.lifecycle.getActiveModel() && runtime),
+			supportsExplodedView: Boolean(runtime?.setExplodedFactor),
+			viewerFacts: this.getFacts()
+		};
+	};
+	/** Task V3: what the viewer knows right now, read from the live objects (never cached copies). */
+	getFacts() {
+		const { camera, lifecycle } = this.target;
+		const modelId = lifecycle.getActiveModel()?.id ?? null;
+		const pointer = this.target.getPointer?.() ?? {
+			componentId: null,
+			source: null
+		};
+		return {
+			hoveredComponentId: pointer.componentId,
+			hoverSource: pointer.componentId ? pointer.source : null,
+			isolatedComponentId: lifecycle.getIsolatedComponentId?.() ?? null,
+			focusedComponentId: this.focused && this.focused.modelId === modelId ? this.focused.componentId : null,
+			camera: {
+				view: camera.classifyView(),
+				autoOrbit: camera.isAutoRotating(),
+				transitioning: camera.isTransitioning(),
+				userSteering: this.isUserSteering()
+			},
+			animation: this.target.getAnimationState?.() ?? {
+				playing: false,
+				speed: 1
+			},
+			highlightedComponentIds: lifecycle.getRaycaster?.()?.getRelatedHighlightIds() ?? [],
+			pendingCommand: this.pending !== null
+		};
+	}
+	execute(command, source) {
+		if (CAMERA_MOTION_TYPES.has(command.type) && this.isUserSteering()) {
+			if (this.pending) this.onDeferredOutcome?.(this.pending.command, this.pending.source, "expired", "Replaced by a newer camera command.");
+			this.pending = {
+				command,
+				source,
+				queuedAt: this.now()
+			};
+			return {
+				status: "deferred",
+				detail: "Hand or mouse is steering the camera; will run when released."
+			};
+		}
+		return this.run(command);
+	}
+	/**
+	* Called once per frame, after gesture input has been applied and before the camera updates.
+	* Cancels transitions the user has taken over, and flushes or expires the deferred command.
+	*/
+	tick(now = this.now()) {
+		const steering = this.isUserSteering();
+		if (steering && this.target.camera.isTransitioning()) this.target.camera.cancelTransition();
+		if (steering) this.focused = null;
+		if (!this.pending) return;
+		if (now - this.pending.queuedAt > 2500) {
+			const { command, source } = this.pending;
+			this.pending = null;
+			this.onDeferredOutcome?.(command, source, "expired", "Hand or mouse kept steering the camera.");
+			return;
+		}
+		if (!steering) {
+			const { command, source } = this.pending;
+			this.pending = null;
+			const outcome = this.run(command);
+			this.onDeferredOutcome?.(command, source, outcome.status === "executed" ? "executed" : "expired", outcome.detail);
+		}
+	}
+	clearPending() {
+		this.pending = null;
+	}
+	run(command) {
+		if (CAMERA_MOTION_TYPES.has(command.type) && command.type !== "component.focus") this.focused = null;
+		const cam = this.target.camera;
+		const now = this.now();
+		switch (command.type) {
+			case "camera.orbit":
+				cam.orbitBy(THREE.MathUtils.degToRad(command.yawDeg), THREE.MathUtils.degToRad(command.pitchDeg ?? 0), void 0, now);
+				return { status: "executed" };
+			case "camera.pan": {
+				const a = command.amount ?? .15;
+				const [right, up] = {
+					left: [-a, 0],
+					right: [a, 0],
+					up: [0, a],
+					down: [0, -a]
+				}[command.direction];
+				cam.panBy(right, up, void 0, now);
+				return { status: "executed" };
+			}
+			case "camera.zoom": {
+				const steps = command.steps ?? 1;
+				const factor = command.direction === "in" ? Math.pow(ZOOM_STEP_FACTOR, steps) : Math.pow(1 / ZOOM_STEP_FACTOR, steps);
+				cam.zoomSmooth(factor, void 0, now);
+				return { status: "executed" };
+			}
+			case "camera.view":
+				cam.goToView(command.view, void 0, now);
+				return { status: "executed" };
+			case "camera.reset":
+				cam.goToView("isometric", void 0, now);
+				return { status: "executed" };
+			case "camera.autoOrbit":
+				this.target.setAutoOrbit(command.enabled);
+				return { status: "executed" };
+			case "component.focus": {
+				const box = this.target.lifecycle.getComponentBounds(command.componentId);
+				const pose = box ? cam.getFocusPose(box) : null;
+				if (!pose) return {
+					status: "rejected",
+					code: "UNKNOWN_COMPONENT",
+					detail: `No geometry found for "${command.componentId}".`
+				};
+				cam.animateTo(pose.position, pose.target, void 0, now);
+				const modelId = this.target.lifecycle.getActiveModel()?.id;
+				this.focused = modelId ? {
+					modelId,
+					componentId: command.componentId
+				} : null;
+				return { status: "executed" };
+			}
+			case "component.highlight":
+			case "component.clearHighlight": {
+				const raycaster = this.target.lifecycle.getRaycaster?.();
+				if (!raycaster) return {
+					status: "rejected",
+					code: "VIEWER_NOT_READY",
+					detail: "Highlighting is not available yet."
+				};
+				raycaster.setRelatedHighlight(command.type === "component.highlight" ? command.componentIds : []);
+				return { status: "executed" };
+			}
+			case "component.isolate":
+				this.target.lifecycle.isolateComponent(command.componentId);
+				return { status: "executed" };
+			case "animation.play":
+				this.target.animation.setPlaying(true);
+				return { status: "executed" };
+			case "animation.pause":
+				this.target.animation.setPlaying(false);
+				return { status: "executed" };
+			case "animation.setSpeed":
+				this.target.animation.setSpeed(command.speed);
+				return { status: "executed" };
+			default: return {
+				status: "rejected",
+				code: "NO_HANDLER",
+				detail: `Viewer cannot handle "${command.type}".`
+			};
+		}
+	}
+};
 // src/components/scene/ViewerCanvas.tsx
 var checkWebGLSupport$1 = () => {
 	if (typeof window === "undefined") return null;
@@ -8099,7 +9036,13 @@ var checkWebGLSupport$1 = () => {
 	if (!(testCanvas.getContext("webgl2") || testCanvas.getContext("webgl"))) return "WebGL is not supported or hardware acceleration is disabled in your browser.";
 	return null;
 };
-var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onModelLoadError, onFpsUpdate, onTelemetryUpdate, className, gestureResult, hands, selectedComponentId, onSelectComponent, hiddenComponentIds, isolatedComponentId, explodedFactor = 0, onExplodedFactorChange }) => {
+var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onModelLoadError, onFpsUpdate, onTelemetryUpdate, className, gestureResult, hands, selectedComponentId, onSelectComponent, hiddenComponentIds, isolatedComponentId, explodedFactor = 0, onExplodedFactorChange, commandDispatcher }) => {
+	const commandDispatcherRef = useRef(commandDispatcher);
+	useEffect(() => {
+		commandDispatcherRef.current = commandDispatcher;
+	}, [commandDispatcher]);
+	const animationPlayingRef = useRef(true);
+	const animationSpeedRef = useRef(1);
 	const containerRef = useRef(null);
 	const canvasRef = useRef(null);
 	const cameraControllerRef = useRef(null);
@@ -8133,6 +9076,10 @@ var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onMod
 		onSelectComponentRef.current = onSelectComponent;
 	}, [onSelectComponent]);
 	const pointerNdcRef = useRef(null);
+	const pointedRef = useRef({
+		componentId: null,
+		source: null
+	});
 	const pointerDownRef = useRef(null);
 	const [cursorState, setCursorState] = useState({
 		visible: false,
@@ -8241,6 +9188,28 @@ var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onMod
 			}
 		});
 		lifecycleManagerRef.current = lifecycleManager;
+		const dispatcher = commandDispatcherRef.current;
+		const commandExecutor = new ViewerCommandExecutor({
+			camera: cameraController,
+			lifecycle: lifecycleManager,
+			isGestureInteracting: () => gestureCameraController.isInteracting(),
+			animation: {
+				setPlaying: (playing) => {
+					animationPlayingRef.current = playing;
+				},
+				setSpeed: (speed) => {
+					animationSpeedRef.current = speed;
+				}
+			},
+			setAutoOrbit: (enabled) => setAutoRotate(enabled),
+			getPointer: () => pointedRef.current,
+			getAnimationState: () => ({
+				playing: animationPlayingRef.current,
+				speed: animationSpeedRef.current
+			})
+		}, (command, source, status, detail) => dispatcher?.reportDeferredOutcome(command, source, status, detail));
+		const unregisterHandler = dispatcher?.registerHandler(commandExecutor);
+		const unregisterContext = dispatcher?.registerContextProvider("viewer", commandExecutor.contextProvider);
 		const initialLoadResult = lifecycleManager.loadModel(modelIdRef.current);
 		if (!initialLoadResult.success) setModelError(initialLoadResult.error ?? "Failed to load initial model");
 		else setModelError(null);
@@ -8283,8 +9252,9 @@ var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onMod
 				frameCount = 0;
 				fpsTimer = 0;
 			}
-			if (autoRotateRef.current) lifecycleManager.updateAnimation(delta, performance.now() / 1e3);
+			if (animationPlayingRef.current) lifecycleManager.updateAnimation(delta * animationSpeedRef.current, performance.now() / 1e3);
 			gestureCameraController.update(gestureResultRef.current, handsRef.current);
+			commandExecutor.tick();
 			let candidateNdc = null;
 			let isGesturePointing = false;
 			let pointingPixelPos = null;
@@ -8308,6 +9278,10 @@ var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onMod
 			const raycaster = lifecycleManager.getRaycaster();
 			const hit = candidateNdc && raycaster ? raycaster.raycast(candidateNdc) : null;
 			const selectorResult = componentSelector.update(hit?.componentId ?? null, delta * 1e3);
+			pointedRef.current = {
+				componentId: selectorResult.hoveredId,
+				source: selectorResult.hoveredId ? isGesturePointing ? "gesture" : "mouse" : null
+			};
 			if (selectorResult.justSelected && selectorResult.selectedId) onSelectComponentRef.current?.(selectorResult.selectedId);
 			if (raycaster) {
 				raycaster.setHoverHighlight(selectorResult.hoveredId);
@@ -8342,6 +9316,9 @@ var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onMod
 			isDisposed = true;
 			cancelAnimationFrame(animationFrameId);
 			resizeObserver.disconnect();
+			unregisterHandler?.();
+			unregisterContext?.();
+			commandExecutor.clearPending();
 			gestureCameraController.dispose();
 			lifecycleManager.dispose();
 			lifecycleManagerRef.current = null;
@@ -8539,7 +9516,10 @@ var ViewerCanvas = ({ modelId = PLANETARY_GEARBOX_MODEL_ID, onModelLoaded, onMod
 					/* @__PURE__ */ jsx("button", {
 						type: "button",
 						className: `toolbar-btn ${autoRotate ? "active" : ""}`,
-						onClick: () => setAutoRotate((prev) => !prev),
+						onClick: () => setAutoRotate((prev) => {
+							animationPlayingRef.current = !prev;
+							return !prev;
+						}),
 						title: "Toggle animation rotation and auto-orbit",
 						"aria-label": "Toggle animation rotation and auto-orbit",
 						children: autoRotate ? "Pause Rotation" : "Auto Rotate"
@@ -9012,11 +9992,15 @@ var SkeletonOverlay = ({ hands, status, trackingFps }) => {
 // src/components/hud/WebcamPreview.tsx
 var WebcamPreview = ({ camera: externalCamera, className, onHandsDetected, onGestureChange }) => {
 	const internalCamera = useCamera();
-	const camera = externalCamera || internalCamera;
-	const [isMinimized, setIsMinimized] = useState(false);
-	const { status, errorMessage, startCamera, stopCamera, videoRef } = camera;
+	const { status, errorMessage, startCamera, stopCamera, videoRef } = externalCamera || internalCamera;
 	const isStreaming = status === "active";
 	const isRequesting = status === "requesting";
+	const [isMinimized, setIsMinimized] = useState(!isStreaming);
+	const [wasStreaming, setWasStreaming] = useState(isStreaming);
+	if (isStreaming !== wasStreaming) {
+		setWasStreaming(isStreaming);
+		if (isStreaming) setIsMinimized(false);
+	}
 	const handTracker = useHandLandmarker({
 		videoRef,
 		isCameraActive: isStreaming
@@ -9281,7 +10265,7 @@ var MetadataRow = ({ label, value, unit, className = "" }) => {
 * Schema-driven inspector rendering multi-tabbed technical metadata for both
 * mechanical and civil engineering components.
 */
-var EngineeringInspectorPanel = ({ metadata: propMetadata, componentId, activeModel, onClose, className = "", initialTab = "overview" }) => {
+var EngineeringInspectorPanel = ({ metadata: propMetadata, componentId, activeModel, onClose, className = "", initialTab = "overview", onAskTutor }) => {
 	const [activeTab, setActiveTab] = useState(initialTab);
 	const panelId = useId();
 	const metadata = resolveInspectorMetadata(propMetadata, componentId, activeModel);
@@ -9338,6 +10322,25 @@ var EngineeringInspectorPanel = ({ metadata: propMetadata, componentId, activeMo
 				/* @__PURE__ */ jsx("p", {
 					className: "empty-description",
 					children: "Hover with the virtual laser pointer and dwell for 1.2s, or left-click any part in the 3D viewport or assembly tree to inspect engineering specifications."
+				}),
+				onAskTutor && /* @__PURE__ */ jsxs("div", {
+					className: "inspector-tutor-card",
+					children: [
+						/* @__PURE__ */ jsx("h4", {
+							className: "card-section-title",
+							children: "Voice tutor"
+						}),
+						/* @__PURE__ */ jsx("p", {
+							className: "empty-description",
+							children: "Select a part, then tap the mic (or press M) and ask “Explain this part”. You can also say “Show the back” or “Zoom in”, in English, తెలుగు or हिन्दी."
+						}),
+						/* @__PURE__ */ jsx("button", {
+							type: "button",
+							className: "tutor-ask-btn",
+							onClick: () => onAskTutor("explain how this model works"),
+							children: "🎓 Explain this model"
+						})
+					]
 				}),
 				/* @__PURE__ */ jsxs("div", {
 					className: "empty-hint-list",
@@ -9459,6 +10462,41 @@ var EngineeringInspectorPanel = ({ metadata: propMetadata, componentId, activeMo
 					"aria-label": "Close component inspector",
 					children: "✕"
 				})]
+			}),
+			onAskTutor && /* @__PURE__ */ jsxs("div", {
+				className: "inspector-tutor-row",
+				role: "group",
+				"aria-label": `Ask the tutor about ${comp.name}`,
+				children: [
+					/* @__PURE__ */ jsx("span", {
+						className: "tutor-row-label",
+						children: "Ask the tutor"
+					}),
+					/* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: "tutor-ask-btn primary",
+						onClick: () => onAskTutor(`explain the ${comp.name}`),
+						children: "🎓 Explain"
+					}),
+					/* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: "tutor-ask-btn",
+						onClick: () => onAskTutor(`why is the ${comp.name} needed`),
+						children: "Why is it needed?"
+					}),
+					/* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: "tutor-ask-btn",
+						onClick: () => onAskTutor(`how does the ${comp.name} work`),
+						children: "How does it work?"
+					}),
+					/* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: "tutor-ask-btn",
+						onClick: () => onAskTutor(`what happens if the ${comp.name} fails`),
+						children: "What if it fails?"
+					})
+				]
 			}),
 			/* @__PURE__ */ jsxs("nav", {
 				className: "inspector-tablist",
@@ -10265,15 +11303,4755 @@ var GuidedLearningPanel = ({ lesson, currentStepIndex, onStepChange, onExit, cla
 		]
 	});
 };
+// src/services/commands/sceneCommandDispatcher.ts
+/**
+* Scene Command Dispatcher (Task V1)
+*
+* The single entry point through which every input method operates the workspace:
+*   input (gesture / voice / keyboard / UI / AI)
+*     -> validateSceneCommand(command, live context)   // reject unknown parts, unsupported actions
+*     -> handler that owns that command type           // viewer (camera, animation) or workspace (state)
+*     -> result: executed | deferred | rejected        // recorded + broadcast to listeners
+*
+* Handlers and context providers are registered by the components that own the relevant state,
+* so no React state is duplicated here.
+*/
+var HISTORY_LIMIT = 50;
+var SceneCommandDispatcher = class {
+	handlers = /* @__PURE__ */ new Map();
+	providers = /* @__PURE__ */ new Map();
+	listeners = /* @__PURE__ */ new Set();
+	history = [];
+	nextId = 1;
+	now;
+	constructor(now = () => Date.now()) {
+		this.now = now;
+	}
+	/** Registers (or replaces) a handler. Returns an unregister function. */
+	registerHandler(handler) {
+		this.handlers.set(handler.id, handler);
+		return () => {
+			if (this.handlers.get(handler.id) === handler) this.handlers.delete(handler.id);
+		};
+	}
+	/** Registers (or replaces) a live context provider. Later providers override earlier keys. */
+	registerContextProvider(id, provider) {
+		this.providers.set(id, provider);
+		return () => {
+			if (this.providers.get(id) === provider) this.providers.delete(id);
+		};
+	}
+	/** Current merged context, used for validation (and later sent to the AI teacher). */
+	getContext() {
+		let ctx = { ...EMPTY_COMMAND_CONTEXT };
+		for (const provider of this.providers.values()) ctx = {
+			...ctx,
+			...provider()
+		};
+		return ctx;
+	}
+	/** Validates and executes a command from any input source. Never throws. */
+	dispatch(input, source) {
+		const validation = validateSceneCommand(input, this.getContext());
+		if (!validation.ok) return this.record({
+			source,
+			command: input,
+			status: "rejected",
+			code: validation.code,
+			detail: validation.reason
+		});
+		const command = validation.command;
+		const handler = [...this.handlers.values()].find((h) => h.canHandle(command.type));
+		if (!handler) return this.record({
+			source,
+			command,
+			status: "rejected",
+			code: "NO_HANDLER",
+			detail: `No handler for "${command.type}".`
+		});
+		try {
+			const outcome = handler.execute(command, source);
+			return this.record({
+				source,
+				command,
+				status: outcome.status,
+				code: outcome.code,
+				detail: outcome.detail
+			});
+		} catch (err) {
+			return this.record({
+				source,
+				command,
+				status: "rejected",
+				code: "NO_HANDLER",
+				detail: `Handler failed: ${err instanceof Error ? err.message : String(err)}`
+			});
+		}
+	}
+	/** Lets a handler report the later fate of a deferred command (executed or expired). */
+	reportDeferredOutcome(command, source, status, detail) {
+		return this.record({
+			source,
+			command,
+			status,
+			detail
+		});
+	}
+	subscribe(listener) {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+	getHistory() {
+		return this.history;
+	}
+	record(entry) {
+		const rec = {
+			id: this.nextId++,
+			timestamp: this.now(),
+			...entry
+		};
+		this.history.push(rec);
+		if (this.history.length > HISTORY_LIMIT) this.history.shift();
+		for (const listener of this.listeners) try {
+			listener(rec);
+		} catch {}
+		return rec;
+	}
+};
+// src/services/voice/recorder.ts
+/**
+* Browser voice recorder (Task V2): microphone -> 16 kHz mono WAV for Gnani Prisma.
+*
+* - Automatic end-of-speech: the first ~250 ms measure background noise; recording stops
+*   ~900 ms after speech falls back to that floor (works with fans, traffic, workshop noise).
+* - Hard cap of 25 s (Prisma's documented ideal is ≤ 30 s).
+* - cancel() stops immediately and discards the audio.
+* The pure pieces (WAV encoding, end-of-speech state machine) are exported for unit tests.
+*/
+var TARGET_SAMPLE_RATE = 16e3;
+var MicError = class extends Error {
+	code;
+	constructor(code, message) {
+		super(message);
+		this.code = code;
+	}
+};
+function classifyMicError(err) {
+	const name = err?.name ?? "";
+	if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") return new MicError("MIC_DENIED", "Microphone permission was denied.");
+	if (name === "NotFoundError" || name === "DevicesNotFoundError") return new MicError("MIC_NOT_FOUND", "No microphone was found.");
+	if (name === "NotReadableError" || name === "TrackStartError" || name === "AbortError") return new MicError("MIC_BUSY", "The microphone is in use by another application.");
+	return new MicError("MIC_ERROR", "The microphone could not be started.");
+}
+/** Root-mean-square level of a sample frame. */
+function rms(frame) {
+	let sum = 0;
+	for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+	return frame.length ? Math.sqrt(sum / frame.length) : 0;
+}
+/** Encodes float32 chunks as 16-bit PCM mono WAV, downsampling with block averaging. */
+function encodeWav(chunks, inRate, outRate = TARGET_SAMPLE_RATE) {
+	const len = chunks.reduce((a, c) => a + c.length, 0);
+	const all = new Float32Array(len);
+	let o = 0;
+	for (const c of chunks) {
+		all.set(c, o);
+		o += c.length;
+	}
+	const ratio = inRate / outRate;
+	const n = Math.max(0, Math.floor(len / ratio));
+	const buf = /* @__PURE__ */ new ArrayBuffer(44 + n * 2);
+	const v = new DataView(buf);
+	const w = (p, s) => [...s].forEach((ch, i) => v.setUint8(p + i, ch.charCodeAt(0)));
+	w(0, "RIFF");
+	v.setUint32(4, 36 + n * 2, true);
+	w(8, "WAVE");
+	w(12, "fmt ");
+	v.setUint32(16, 16, true);
+	v.setUint16(20, 1, true);
+	v.setUint16(22, 1, true);
+	v.setUint32(24, outRate, true);
+	v.setUint32(28, outRate * 2, true);
+	v.setUint16(32, 2, true);
+	v.setUint16(34, 16, true);
+	w(36, "data");
+	v.setUint32(40, n * 2, true);
+	for (let i = 0; i < n; i++) {
+		const a = Math.floor(i * ratio);
+		const b = Math.min(len, Math.floor((i + 1) * ratio));
+		let s = 0;
+		for (let j = a; j < b; j++) s += all[j];
+		const x = Math.max(-1, Math.min(1, s / Math.max(1, b - a)));
+		v.setInt16(44 + i * 2, x < 0 ? x * 32768 : x * 32767, true);
+	}
+	return new Uint8Array(buf);
+}
+/**
+* End-of-speech detector. Feed it each frame's RMS level and duration; it returns a reason
+* when recording should stop, otherwise null. Adapts to the background noise level.
+*/
+var SpeechEndDetector = class {
+	calib = [];
+	floor = .004;
+	loudFrames = 0;
+	silentMs = 0;
+	elapsedMs = 0;
+	speechStarted = false;
+	push(level, frameMs) {
+		this.elapsedMs += frameMs;
+		if (this.calib.length < 6) {
+			this.calib.push(level);
+			const sorted = [...this.calib].sort((a, b) => a - b);
+			this.floor = Math.max(.003, sorted[Math.floor(sorted.length / 2)]);
+		}
+		const speechTh = Math.max(this.floor * 3, .015);
+		const silenceTh = Math.max(this.floor * 1.8, .008);
+		if (!this.speechStarted) {
+			this.loudFrames = level > speechTh ? this.loudFrames + 1 : 0;
+			if (this.loudFrames >= 3) this.speechStarted = true;
+			else if (this.calib.length >= 6) this.floor = .95 * this.floor + .05 * Math.min(level, this.floor * 2);
+			if (!this.speechStarted && this.elapsedMs > 8e3) return "nospeech";
+		} else {
+			this.silentMs = level < silenceTh ? this.silentMs + frameMs : 0;
+			if (this.silentMs >= 900) return "silence";
+		}
+		if (this.elapsedMs >= 25e3) return "max";
+		return null;
+	}
+};
+/** Starts recording. Throws MicError on permission/device problems. */
+async function startRecording(onLevel) {
+	if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) throw new MicError("MIC_UNSUPPORTED", "This browser cannot record audio.");
+	let stream;
+	try {
+		stream = await navigator.mediaDevices.getUserMedia({ audio: {
+			echoCancellation: true,
+			noiseSuppression: true,
+			autoGainControl: true,
+			channelCount: 1
+		} });
+	} catch (err) {
+		throw classifyMicError(err);
+	}
+	const ctx = new (window.AudioContext || window.webkitAudioContext)();
+	const source = ctx.createMediaStreamSource(stream);
+	const proc = ctx.createScriptProcessor(2048, 1, 1);
+	const frameMs = 2048 / ctx.sampleRate * 1e3;
+	const chunks = [];
+	const detector = new SpeechEndDetector();
+	let finished = false;
+	let resolveDone;
+	const done = new Promise((r) => resolveDone = r);
+	const finish = (reason) => {
+		if (finished) return;
+		finished = true;
+		proc.disconnect();
+		source.disconnect();
+		stream.getTracks().forEach((t) => t.stop());
+		const wav = reason !== "cancelled" && reason !== "nospeech" && chunks.length > 0 ? new Blob([encodeWav(chunks, ctx.sampleRate)], { type: "audio/wav" }) : null;
+		ctx.close();
+		resolveDone({
+			wav,
+			reason
+		});
+	};
+	proc.onaudioprocess = (e) => {
+		if (finished) return;
+		const frame = new Float32Array(e.inputBuffer.getChannelData(0));
+		chunks.push(frame);
+		const level = rms(frame);
+		onLevel?.(level);
+		const end = detector.push(level, frameMs);
+		if (end) finish(end);
+	};
+	source.connect(proc);
+	proc.connect(ctx.destination);
+	return {
+		stop: () => finish(detector.speechStarted || chunks.length > 8 ? "manual" : "nospeech"),
+		cancel: () => finish("cancelled"),
+		done
+	};
+}
+// src/services/voice/voiceClient.ts
+var VoiceServiceError = class extends Error {
+	code;
+	constructor(code, message) {
+		super(message);
+		this.code = code;
+	}
+};
+var CLIENT_TIMEOUT_MS = 25e3;
+/** User-facing explanation for each error code (English UI text). */
+var VOICE_ERROR_MESSAGES = {
+	BACKEND_UNAVAILABLE: "Voice server is not running. Start it from backend/ with: python -m uvicorn app.main:app --port 8000",
+	TIMEOUT: "The voice service took too long. Please try again.",
+	KEY_MISSING: "Voice is not configured: GNANI_API_KEY is missing on the server.",
+	GNANI_FORBIDDEN: "Gnani refused the request — check the API key or remaining credits.",
+	GNANI_AUTH: "Gnani rejected the API key.",
+	GNANI_RATE_LIMIT: "Too many requests to Gnani. Please wait a moment.",
+	GNANI_UNAVAILABLE: "Gnani speech service is temporarily unavailable.",
+	GNANI_TIMEOUT: "Gnani took too long to respond.",
+	GNANI_UNREACHABLE: "The server could not reach Gnani. Check the internet connection.",
+	AUDIO_TOO_SHORT: "That was too short — please speak a little longer.",
+	AUDIO_TOO_LONG: "Please keep commands under 30 seconds."
+};
+async function call(path, init, signal, fetchImpl = fetch) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(new DOMException("timeout", "TimeoutError")), CLIENT_TIMEOUT_MS);
+	const onAbort = () => controller.abort(new DOMException("cancelled", "AbortError"));
+	signal?.addEventListener("abort", onAbort);
+	try {
+		return await fetchImpl(path, {
+			...init,
+			signal: controller.signal
+		});
+	} catch {
+		if (signal?.aborted) throw new VoiceServiceError("CANCELLED", "Cancelled.");
+		if (controller.signal.aborted) throw new VoiceServiceError("TIMEOUT", VOICE_ERROR_MESSAGES.TIMEOUT);
+		throw new VoiceServiceError("BACKEND_UNAVAILABLE", VOICE_ERROR_MESSAGES.BACKEND_UNAVAILABLE);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+/** Turns a non-OK response into a VoiceServiceError (handles the proxy's HTML/empty 5xx when the backend is down). */
+async function toError(resp) {
+	let code = "UNKNOWN";
+	let message = `Voice request failed (${resp.status}).`;
+	try {
+		const body = await resp.json();
+		if (body?.error?.code) {
+			code = body.error.code;
+			message = body.error.message ?? message;
+		}
+	} catch {
+		if (resp.status === 502 || resp.status === 503 || resp.status === 504 || resp.status === 500) code = "BACKEND_UNAVAILABLE";
+	}
+	return new VoiceServiceError(code, VOICE_ERROR_MESSAGES[code] ?? message);
+}
+async function getVoiceHealth(signal, fetchImpl) {
+	const resp = await call("/api/voice/health", { method: "GET" }, signal, fetchImpl);
+	if (!resp.ok) throw await toError(resp);
+	try {
+		return await resp.json();
+	} catch {
+		throw new VoiceServiceError("BACKEND_UNAVAILABLE", VOICE_ERROR_MESSAGES.BACKEND_UNAVAILABLE);
+	}
+}
+async function transcribe(wav, language, signal, fetchImpl) {
+	const form = new FormData();
+	form.append("audio", wav, "speech.wav");
+	form.append("language", language);
+	const resp = await call("/api/voice/transcribe", {
+		method: "POST",
+		body: form
+	}, signal, fetchImpl);
+	if (!resp.ok) throw await toError(resp);
+	const body = await resp.json();
+	return String(body.transcript ?? "");
+}
+async function synthesize(text, language, signal, fetchImpl) {
+	const resp = await call("/api/voice/speak", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			text,
+			language
+		})
+	}, signal, fetchImpl);
+	if (!resp.ok) throw await toError(resp);
+	return await resp.blob();
+}
+// src/services/voice/partLexicon.ts
+/** English engineering words -> spellings Prisma produces in Telugu / Hindi script. */
+var LOANWORD_SPELLINGS = {
+	sun: {
+		te: ["సన్"],
+		hi: ["सन"]
+	},
+	gear: {
+		te: ["గేర్", "గియర్"],
+		hi: ["गियर", "गेयर"]
+	},
+	gears: {
+		te: ["గేర్లు", "గేర్స్"],
+		hi: ["गियर्स", "गियरों"]
+	},
+	planet: {
+		te: ["ప్లానెట్", "ప్లానెట"],
+		hi: ["प्लैनेट", "प्लेनेट"]
+	},
+	ring: {
+		te: ["రింగ్"],
+		hi: ["रिंग"]
+	},
+	carrier: {
+		te: ["క్యారియర్", "కారియర్"],
+		hi: ["कैरियर", "कैरीयर"]
+	},
+	plate: {
+		te: ["ప్లేట్"],
+		hi: ["प्लेट"]
+	},
+	plates: {
+		te: ["ప్లేట్లు", "ప్లేట్స్"],
+		hi: ["प्लेट्स"]
+	},
+	shaft: {
+		te: ["షాఫ్ట్"],
+		hi: ["शाफ्ट", "शाफ़्ट"]
+	},
+	drive: {
+		te: ["డ్రైవ్"],
+		hi: ["ड्राइव"]
+	},
+	central: {
+		te: ["సెంట్రల్"],
+		hi: ["सेंट्रल"]
+	},
+	outer: {
+		te: ["ఔటర్"],
+		hi: ["आउटर"]
+	},
+	annulus: {
+		te: ["అన్యులస్"],
+		hi: ["एनुलस"]
+	},
+	primary: {
+		te: ["ప్రైమరీ"],
+		hi: ["प्राइमरी"]
+	},
+	top: {
+		te: ["టాప్"],
+		hi: ["टॉप"]
+	},
+	bottom: {
+		te: ["బాటమ్"],
+		hi: ["बॉटम"]
+	},
+	upper: {
+		te: ["అప్పర్"],
+		hi: ["अपर"]
+	},
+	lower: {
+		te: ["లోయర్"],
+		hi: ["लोअर"]
+	},
+	chord: {
+		te: ["కార్డ్"],
+		hi: ["कॉर्ड"]
+	},
+	chords: {
+		te: ["కార్డ్స్", "కార్డులు"],
+		hi: ["कॉर्ड्स"]
+	},
+	diagonal: {
+		te: ["డయాగనల్"],
+		hi: ["डायगोनल", "डायगनल"]
+	},
+	member: {
+		te: ["మెంబర్"],
+		hi: ["मेंबर"]
+	},
+	members: {
+		te: ["మెంబర్స్"],
+		hi: ["मेंबर्स"]
+	},
+	vertical: {
+		te: ["వర్టికల్"],
+		hi: ["वर्टिकल"]
+	},
+	strut: {
+		te: ["స్ట్రట్"],
+		hi: ["स्ट्रट"]
+	},
+	struts: {
+		te: ["స్ట్రట్స్"],
+		hi: ["स्ट्रट्स"]
+	},
+	gusset: {
+		te: ["గస్సెట్", "గసెట్"],
+		hi: ["गसेट"]
+	},
+	end: {
+		te: ["ఎండ్"],
+		hi: ["एंड"]
+	},
+	portal: {
+		te: ["పోర్టల్"],
+		hi: ["पोर्टल"]
+	},
+	portals: {
+		te: ["పోర్టల్స్"],
+		hi: ["पोर्टल्स"]
+	},
+	bridge: {
+		te: ["బ్రిడ్జ్", "బ్రిడ్జి"],
+		hi: ["ब्रिज"]
+	},
+	deck: {
+		te: ["డెక్"],
+		hi: ["डेक"]
+	},
+	support: {
+		te: ["సపోర్ట్"],
+		hi: ["सपोर्ट"]
+	},
+	pier: {
+		te: ["పియర్"],
+		hi: ["पियर"]
+	},
+	piers: {
+		te: ["పియర్స్"],
+		hi: ["पियर्स"]
+	},
+	a: {
+		te: ["ఏ"],
+		hi: ["ए"]
+	},
+	b: {
+		te: ["బీ", "బి"],
+		hi: ["बी"]
+	},
+	c: {
+		te: ["సీ", "సి"],
+		hi: ["सी"]
+	}
+};
+/** Lower-case, strip punctuation, Devanagari nukta and zero-width joiners, collapse spaces. */
+function normalise(text) {
+	return text.normalize("NFC").toLowerCase().replace(/[़‌‍]/g, "").replace(/[.,!?;:"'()[\]{}|/\\\-–—_&।॥]/g, " ").replace(/\s+/g, " ").trim();
+}
+var singular = (w) => w.length > 3 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w;
+var STOP_WORDS = /* @__PURE__ */ new Set([
+	"and",
+	"the",
+	"of",
+	"cluster",
+	"assembly",
+	"system",
+	"stage"
+]);
+/** English phrase variants of one name. */
+function englishVariants(name) {
+	const parts = name.split(/[()&,]/).map((p) => normalise(p)).filter(Boolean);
+	const out = /* @__PURE__ */ new Set();
+	for (const p of parts) {
+		const words = p.split(" ").filter((w) => !STOP_WORDS.has(w));
+		if (words.length === 0) continue;
+		out.add(words.join(" "));
+		out.add(words.map(singular).join(" "));
+		if (words.length > 1 && /^([a-z]|\d+)$/.test(words[words.length - 1])) out.add(words.slice(0, -1).join(" "));
+		if (words.length > 2) {
+			out.add(words.slice(-2).join(" "));
+			out.add(words.slice(-2).map(singular).join(" "));
+		}
+		for (const w of words) if (w.length > 3) {
+			out.add(w);
+			out.add(singular(w));
+		}
+	}
+	return [...out];
+}
+/** Telugu / Hindi spellings of an English phrase, only when every word has a known spelling. */
+function scriptVariants(phrase) {
+	const words = phrase.split(" ");
+	const out = [];
+	for (const script of ["te", "hi"]) {
+		let combos = [""];
+		for (const w of words) {
+			const spellings = LOANWORD_SPELLINGS[w]?.[script];
+			if (!spellings) {
+				combos = [];
+				break;
+			}
+			combos = combos.flatMap((c) => spellings.map((s) => c ? `${c} ${s}` : s));
+		}
+		out.push(...combos.map(normalise));
+	}
+	return out;
+}
+function collectTreeNames(node, into) {
+	if (node.componentId) {
+		const list = into.get(node.componentId) ?? [];
+		list.push(node.name);
+		into.set(node.componentId, list);
+	}
+	node.children?.forEach((c) => collectTreeNames(c, into));
+}
+function buildPartLexicon(model) {
+	const treeNames = /* @__PURE__ */ new Map();
+	collectTreeNames(model.getAssemblyTree(), treeNames);
+	const raw = model.getAllComponentIds().map((componentId) => {
+		const meta = model.getComponentMetadata(componentId);
+		const names = [
+			componentId.replace(/_/g, " ").replace(/\s\d+$/, ""),
+			...treeNames.get(componentId) ?? [],
+			...meta?.name ? [meta.name] : []
+		];
+		const english = new Set(names.flatMap(englishVariants));
+		const phrases = new Set(english);
+		english.forEach((p) => scriptVariants(p).forEach((v) => phrases.add(v)));
+		return {
+			componentId,
+			displayName: treeNames.get(componentId)?.[0] ?? meta?.name ?? componentId,
+			phrases
+		};
+	});
+	const singleWordOwners = /* @__PURE__ */ new Map();
+	for (const e of raw) for (const p of e.phrases) if (!p.includes(" ")) {
+		const owners = singleWordOwners.get(p) ?? /* @__PURE__ */ new Set();
+		owners.add(e.componentId);
+		singleWordOwners.set(p, owners);
+	}
+	const modelWords = /* @__PURE__ */ new Set();
+	for (const w of normalise(model.name).split(" ")) {
+		modelWords.add(w);
+		modelWords.add(singular(w));
+		scriptVariants(w).forEach((v) => modelWords.add(v));
+	}
+	return raw.map((e) => ({
+		componentId: e.componentId,
+		displayName: e.displayName,
+		phrases: [...e.phrases].filter((p) => p.includes(" ") || singleWordOwners.get(p).size === 1 && !modelWords.has(p))
+	}));
+}
+// src/services/scene/referenceResolver.ts
+function resolveComponentReference(req, scene) {
+	const valid = new Set(scene.components.map((c) => c.id));
+	const explicit = [...new Set(req.explicitIds)].filter((id) => valid.has(id));
+	if (explicit.length === 1) return {
+		kind: "resolved",
+		componentId: explicit[0],
+		via: "explicit"
+	};
+	if (explicit.length > 1) return {
+		kind: "ambiguous",
+		options: explicit
+	};
+	if (!req.contextual) return { kind: "needsClarification" };
+	const pointed = scene.pointer.status === "known" ? scene.pointer.value.componentId : null;
+	if (pointed && valid.has(pointed)) return {
+		kind: "resolved",
+		componentId: pointed,
+		via: "pointed"
+	};
+	if (scene.selectedComponentId && valid.has(scene.selectedComponentId)) return {
+		kind: "resolved",
+		componentId: scene.selectedComponentId,
+		via: "selected"
+	};
+	const last = scene.lastDiscussedComponentId.status === "known" ? scene.lastDiscussedComponentId.value : null;
+	if (last && valid.has(last)) return {
+		kind: "resolved",
+		componentId: last,
+		via: "lastDiscussed"
+	};
+	return { kind: "needsClarification" };
+}
+// src/services/voice/phraseParser.ts
+/** Common machine parts that are not in any current model (English + Telugu + Hindi spellings). */
+var COMMON_FOREIGN_PARTS = [
+	"piston",
+	"pistons",
+	"crankshaft",
+	"crank shaft",
+	"connecting rod",
+	"cylinder",
+	"valve",
+	"valves",
+	"camshaft",
+	"cam shaft",
+	"spark plug",
+	"flywheel",
+	"fly wheel",
+	"engine",
+	"wheel",
+	"brake",
+	"clutch",
+	"pulley",
+	"belt",
+	"propeller",
+	"turbine",
+	"nozzle",
+	"పిస్టన్",
+	"క్రాంక్ షాఫ్ట్",
+	"క్రాంక్‌షాఫ్ట్",
+	"సిలిండర్",
+	"వాల్వ్",
+	"ఇంజన్",
+	"ఇంజిన్",
+	"ఫ్లైవీల్",
+	"కనెక్టింగ్ రాడ్",
+	"पिस्टन",
+	"क्रैंकशाफ्ट",
+	"क्रैंक शाफ्ट",
+	"सिलेंडर",
+	"वाल्व",
+	"इंजन",
+	"फ्लाईव्हील",
+	"कनेक्टिंग रॉड"
+].map(normalise);
+var W = {
+	zoom: [
+		"zoom",
+		"జూమ్",
+		"जूम"
+	],
+	in: [
+		"in",
+		"closer",
+		"nearer",
+		"ఇన్",
+		"దగ్గరగా",
+		"దగ్గరికి",
+		"इन",
+		"पास",
+		"करीब",
+		"नजदीक"
+	],
+	out: [
+		"out",
+		"farther",
+		"further",
+		"away",
+		"అవుట్",
+		"దూరంగా",
+		"దూరం",
+		"आउट",
+		"दूर"
+	],
+	bigger: [
+		"bigger",
+		"larger",
+		"enlarge",
+		"magnify",
+		"పెద్దగా",
+		"పెద్దది",
+		"बड़ा"
+	],
+	smaller: [
+		"smaller",
+		"shrink",
+		"చిన్నగా",
+		"చిన్నది",
+		"छोटा"
+	],
+	move: [
+		"move",
+		"pan",
+		"shift",
+		"slide",
+		"మూవ్",
+		"జరుపు",
+		"జరపండి",
+		"జరిపి",
+		"కదుపు",
+		"కదపండి",
+		"మూవ్",
+		"मूव",
+		"खिसकाओ",
+		"खिसकाइए",
+		"सरकाओ",
+		"हटाओ",
+		"ले जाओ",
+		"पैन"
+	],
+	rotate: [
+		"rotate",
+		"turn",
+		"spin",
+		"orbit",
+		"రొటేట్",
+		"తిప్పు",
+		"తిప్పండి",
+		"తిప్పి",
+		"రొటేట్",
+		"रोटेट",
+		"घुमाओ",
+		"घुमाइए",
+		"घुमा",
+		"मोड़ो"
+	],
+	left: [
+		"left",
+		"లెఫ్ట్",
+		"ఎడమ",
+		"लेफ्ट",
+		"बाएं",
+		"बायें",
+		"बाईं",
+		"बाएँ",
+		"बाई"
+	],
+	right: [
+		"right",
+		"రైట్",
+		"కుడి",
+		"राइट",
+		"दाएं",
+		"दायें",
+		"दाईं",
+		"दाएँ",
+		"दाई"
+	],
+	up: [
+		"up",
+		"upward",
+		"upwards",
+		"అప్",
+		"పైకి",
+		"పైన",
+		"अप",
+		"ऊपर"
+	],
+	down: [
+		"down",
+		"downward",
+		"downwards",
+		"డౌన్",
+		"కిందకి",
+		"కిందికి",
+		"కింద",
+		"डाउन",
+		"नीचे"
+	],
+	side: [
+		"side",
+		"view",
+		"వైపు",
+		"సైడ్",
+		"వ్యూ",
+		"తరఫు",
+		"तरफ",
+		"साइड",
+		"व्यू",
+		"ओर"
+	],
+	back: [
+		"back",
+		"behind",
+		"rear",
+		"backside",
+		"బ్యాక్",
+		"వెనుక",
+		"వెనక",
+		"बैक",
+		"पीछे",
+		"पिछला हिस्सा"
+	],
+	front: [
+		"front",
+		"ఫ్రంట్",
+		"ముందు",
+		"ముందర",
+		"फ्रंट",
+		"सामने",
+		"आगे"
+	],
+	top: [
+		"top",
+		"above",
+		"overhead",
+		"టాప్",
+		"పై నుంచి",
+		"పైనుంచి",
+		"పైనుండి",
+		"टॉप",
+		"ऊपर से"
+	],
+	isometric: [
+		"isometric",
+		"3d view",
+		"three d",
+		"ఐసోమెట్రిక్",
+		"आइसोमेट्रिक"
+	],
+	reset: [
+		"reset",
+		"original view",
+		"default view",
+		"normal view",
+		"restore the view",
+		"restore view",
+		"home view",
+		"రీసెట్",
+		"మొదటి లాగా",
+		"మొదటిలాగా",
+		"అసలు వ్యూ",
+		"रीसेट",
+		"पहले जैसा",
+		"पहले जैसे",
+		"ओरिजिनल व्यू"
+	],
+	select: [
+		"select",
+		"choose",
+		"pick",
+		"highlight",
+		"సెలెక్ట్",
+		"ఎంచుకో",
+		"ఎంచుకోండి",
+		"ఎంచుకొను",
+		"सेलेक्ट",
+		"चुनो",
+		"चुनिए",
+		"चुनें",
+		"हाइलाइट"
+	],
+	focus: [
+		"focus",
+		"zoom to",
+		"zoom into",
+		"zoom on",
+		"go to",
+		"show me",
+		"ఫోకస్",
+		"చూపించు",
+		"చూపించండి",
+		"చూపు",
+		"फोकस",
+		"दिखाओ",
+		"दिखाइए",
+		"दिखाएं"
+	],
+	isolate: [
+		"isolate",
+		"separate",
+		"only",
+		"alone",
+		"detach",
+		"ఐసోలేట్",
+		"వేరు",
+		"వేరుగా",
+		"మాత్రమే",
+		"విడిగా",
+		"आइसोलेट",
+		"अलग",
+		"सिर्फ",
+		"केवल",
+		"अकेला"
+	],
+	hide: [
+		"hide",
+		"remove",
+		"దాచు",
+		"దాచండి",
+		"హైడ్",
+		"తీసేయి",
+		"తీసేయండి",
+		"छुपाओ",
+		"छिपाओ",
+		"छुपा",
+		"हाइड",
+		"हटा दो"
+	],
+	unhide: [
+		"unhide",
+		"show again",
+		"bring back",
+		"మళ్లీ చూపించు",
+		"అన్‌హైడ్",
+		"वापस दिखाओ",
+		"फिर से दिखाओ",
+		"अनहाइड"
+	],
+	all: [
+		"all",
+		"everything",
+		"whole",
+		"entire",
+		"అన్నీ",
+		"అన్ని",
+		"మొత్తం",
+		"పూర్తి",
+		"सब",
+		"सारा",
+		"सारे",
+		"पूरा",
+		"पूरी"
+	],
+	show: [
+		"show",
+		"display",
+		"చూపించు",
+		"చూపించండి",
+		"చూపు",
+		"दिखाओ",
+		"दिखाइए"
+	],
+	explode: [
+		"explode",
+		"exploded",
+		"take apart",
+		"disassemble",
+		"pull apart",
+		"open up",
+		"separate the parts",
+		"separate all",
+		"ఎక్స్‌ప్లోడ్",
+		"ఎక్స్ప్లోడ్",
+		"విడదీయి",
+		"విడదీయండి",
+		"విడదీసి",
+		"విడగొట్టు",
+		"విప్పు",
+		"విప్పండి",
+		"एक्सप्लोड",
+		"खोलो",
+		"खोलिए",
+		"अलग अलग",
+		"पुर्जे अलग"
+	],
+	assemble: [
+		"assemble",
+		"reassemble",
+		"back together",
+		"together",
+		"combine",
+		"restore the assembly",
+		"restore assembly",
+		"close it",
+		"అసెంబుల్",
+		"కలుపు",
+		"కలపండి",
+		"కలిపి",
+		"జోడించు",
+		"జోడించండి",
+		"మళ్లీ కలుపు",
+		"असेंबल",
+		"जोड़ो",
+		"जोड़ दो",
+		"जोड़िए",
+		"जोड़ो",
+		"जोड़",
+		"वापस जोड़ो",
+		"मिलाओ"
+	],
+	animation: [
+		"animation",
+		"motion",
+		"movement",
+		"gears",
+		"mechanism",
+		"యానిమేషన్",
+		"కదలిక",
+		"एनिमेशन",
+		"गति",
+		"हलचल"
+	],
+	pause: [
+		"pause",
+		"freeze",
+		"stop",
+		"halt",
+		"పాజ్",
+		"ఆపు",
+		"ఆపండి",
+		"ఆపేయ్",
+		"ఆగు",
+		"पॉज",
+		"रोको",
+		"रोकिए",
+		"रोक दो",
+		"बंद करो",
+		"रुको"
+	],
+	play: [
+		"play",
+		"resume",
+		"start",
+		"run",
+		"animate",
+		"continue",
+		"ప్లే",
+		"నడిపించు",
+		"మొదలుపెట్టు",
+		"స్టార్ట్",
+		"కొనసాగించు",
+		"प्ले",
+		"चलाओ",
+		"चलाइए",
+		"शुरू",
+		"स्टार्ट"
+	],
+	slower: [
+		"slow",
+		"slower",
+		"slowly",
+		"స్లో",
+		"నెమ్మదిగా",
+		"మెల్లగా",
+		"स्लो",
+		"धीरे",
+		"धीमा"
+	],
+	faster: [
+		"fast",
+		"faster",
+		"quick",
+		"quicker",
+		"speed up",
+		"ఫాస్ట్",
+		"వేగంగా",
+		"త్వరగా",
+		"फास्ट",
+		"तेज",
+		"जल्दी"
+	],
+	normalSpeed: [
+		"normal speed",
+		"regular speed",
+		"నార్మల్ స్పీడ్",
+		"సాధారణ వేగం",
+		"नॉर्मल स्पीड",
+		"सामान्य गति"
+	],
+	auto: [
+		"auto rotate",
+		"auto rotation",
+		"auto orbit",
+		"autorotate",
+		"ఆటో రొటేట్",
+		"ఆటో",
+		"ऑटो रोटेट",
+		"ऑटो"
+	],
+	on: [
+		"on",
+		"enable",
+		"start",
+		"ఆన్",
+		"ఆన్ చేయి",
+		"ऑन",
+		"चालू"
+	],
+	lesson: [
+		"lesson",
+		"tour",
+		"guided",
+		"tutorial",
+		"teach me",
+		"పాఠం",
+		"లెసన్",
+		"టూర్",
+		"పాఠము",
+		"पाठ",
+		"लेसन",
+		"टूर",
+		"सबक"
+	],
+	next: [
+		"next",
+		"next step",
+		"continue",
+		"తర్వాత",
+		"తరువాత",
+		"నెక్స్ట్",
+		"ముందుకు",
+		"अगला",
+		"आगे बढ़ो",
+		"नेक्स्ट"
+	],
+	previous: [
+		"previous",
+		"go back",
+		"last step",
+		"back step",
+		"ముందటి",
+		"వెనక్కి",
+		"వెనుకకు",
+		"ప్రీవియస్",
+		"पिछला",
+		"पीछे जाओ",
+		"प्रीवियस"
+	],
+	exit: [
+		"exit",
+		"end",
+		"quit",
+		"close",
+		"stop",
+		"ఆపు",
+		"ముగించు",
+		"ఎగ్జిట్",
+		"బయటకు",
+		"बंद",
+		"खत्म",
+		"एग्जिट",
+		"समाप्त"
+	],
+	home: [
+		"go home",
+		"home page",
+		"homepage",
+		"main menu",
+		"catalogue",
+		"catalog",
+		"dashboard",
+		"హోమ్",
+		"హోం",
+		"होम",
+		"मुख्य पेज"
+	],
+	thisRef: [
+		"this",
+		"that",
+		"it",
+		"its",
+		"selected",
+		"this part",
+		"this one",
+		"that one",
+		"ఇది",
+		"దీన్ని",
+		"దీనిని",
+		"దాన్ని",
+		"ఈ పార్ట్",
+		"ఇదే",
+		"ఈ భాగం",
+		"యిది",
+		"దీని",
+		"దాని",
+		"అది",
+		"यह",
+		"इसे",
+		"इस",
+		"ये",
+		"इसको",
+		"उसे",
+		"उस",
+		"वो",
+		"वह"
+	],
+	related: [
+		"connected",
+		"related",
+		"attached",
+		"linked",
+		"neighbour",
+		"neighbor",
+		"neighbours",
+		"neighbors",
+		"meshes with",
+		"mesh with",
+		"touching",
+		"కనెక్ట్",
+		"అనుసంధాన",
+		"జతచేయబడిన",
+		"కలిసి ఉన్న",
+		"సంబంధిత",
+		"जुड़े",
+		"जुड़ा",
+		"जुड़ी",
+		"कनेक्टेड",
+		"संबंधित",
+		"लगे हुए"
+	],
+	clear: [
+		"clear",
+		"remove",
+		"stop",
+		"turn off",
+		"off",
+		"తీసేయి",
+		"తీసేయండి",
+		"ఆపు",
+		"हटाओ",
+		"हटा दो",
+		"बंद"
+	],
+	highlightWord: [
+		"highlight",
+		"highlighting",
+		"highlights",
+		"glow",
+		"హైలైట్",
+		"हाइलाइट"
+	],
+	putBack: [
+		"put it back",
+		"put back",
+		"put them back",
+		"undo that",
+		"వెనక్కి పెట్టు",
+		"మళ్లీ పెట్టు",
+		"యథాస్థానంలో",
+		"वापस रखो",
+		"वापस लगाओ",
+		"वापस करो"
+	],
+	together: [
+		"together",
+		"assemble",
+		"కలుపు",
+		"కలిపి",
+		"जोड़"
+	],
+	qFailure: [
+		"stops working",
+		"stop working",
+		"stopped working",
+		"fails",
+		"failed",
+		"failure",
+		"breaks",
+		"broken",
+		"what happens if",
+		"what if",
+		"what would happen",
+		"would happen if",
+		"were missing",
+		"is missing",
+		"without it",
+		"పనిచేయకపోతే",
+		"పని చేయకపోతే",
+		"పాడైతే",
+		"విరిగితే",
+		"ఆగిపోతే",
+		"खराब हो",
+		"टूट",
+		"काम करना बंद",
+		"बंद हो जाए",
+		"काम न करे"
+	],
+	qHow: [
+		"how does",
+		"how do",
+		"how is",
+		"how it works",
+		"what happens when",
+		"show me how",
+		"interacts",
+		"interact with",
+		"ఎలా",
+		"कैसे"
+	],
+	qPurpose: [
+		"why",
+		"purpose",
+		"what does",
+		"what is it for",
+		"what is the use",
+		"used for",
+		"needed",
+		"what is it used",
+		"role",
+		"job",
+		"ఎందుకు",
+		"ఉపయోగం",
+		"పని ఏమిటి",
+		"ఏం చేస్తుంది",
+		"ఏమి చేస్తుంది",
+		"పాత్ర",
+		"అవసరం",
+		"क्यों",
+		"उपयोग",
+		"काम क्या",
+		"किस काम",
+		"क्या करता",
+		"क्या करती",
+		"भूमिका",
+		"जरूरत"
+	],
+	qExplain: [
+		"explain",
+		"tell me about",
+		"describe",
+		"వివరించు",
+		"వివరించండి",
+		"వివరించగలరా",
+		"గురించి",
+		"చెప్పు",
+		"చెప్పండి",
+		"ఎక్స్ప్లెయిన్",
+		"ఎక్స్ప్లేన్",
+		"ఎక్స్ప్లైన్",
+		"ఎక్స్ప్లెయిన",
+		"డిస్క్రైబ్",
+		"समझाओ",
+		"समझाइए",
+		"समझा दो",
+		"के बारे में",
+		"बताओ",
+		"बताइए",
+		"एक्सप्लेन",
+		"एक्स्प्लेन",
+		"डिस्क्राइब"
+	],
+	teachTopic: [
+		"power flow",
+		"power flows",
+		"flow of power",
+		"power transmission",
+		"transmits power",
+		"load path",
+		"load transfer",
+		"load transfers",
+		"forces travel",
+		"force travels",
+		"forces flow",
+		"how forces",
+		"how the load",
+		"how power",
+		"శక్తి ఎలా",
+		"బలం ఎలా",
+		"లోడ్ ఎలా",
+		"शक्ति कैसे",
+		"बल कैसे",
+		"लोड कैसे",
+		"पावर कैसे"
+	],
+	modelNoun: [
+		"gearbox",
+		"gear box",
+		"bridge",
+		"truss",
+		"model",
+		"machine",
+		"mechanism",
+		"structure",
+		"transmission",
+		"గేర్‌బాక్స్",
+		"గేర్ బాక్స్",
+		"గేర్బాక్స్",
+		"వంతెన",
+		"బ్రిడ్జ్",
+		"మోడల్",
+		"యంత్రం",
+		"गियरबॉक्स",
+		"गियर बॉक्स",
+		"पुल",
+		"ब्रिज",
+		"मॉडल",
+		"मशीन",
+		"ढांचा"
+	],
+	thisWord: [
+		"ఈ",
+		"ఆ",
+		"यह",
+		"ये",
+		"वह",
+		"वो"
+	],
+	bottomView: [
+		"bottom view",
+		"bottom side",
+		"from the bottom",
+		"from below",
+		"from underneath",
+		"underside",
+		"view from under",
+		"కింది వైపు",
+		"కింద నుంచి",
+		"కింది నుండి",
+		"అడుగు భాగం",
+		"नीचे से",
+		"नीचे का दृश्य",
+		"नीचे की तरफ से",
+		"तले का"
+	],
+	determiner: [
+		"this",
+		"that",
+		"the",
+		"entire",
+		"whole",
+		"overall",
+		"ఈ",
+		"ఆ",
+		"మొత్తం",
+		"यह",
+		"इस",
+		"पूरे",
+		"पूरा"
+	],
+	ctlPause: [
+		"pause",
+		"wait",
+		"hold on",
+		"one minute",
+		"one second",
+		"ఆగు",
+		"ఆగండి",
+		"ఒక్క నిమిషం",
+		"ఒక్క క్షణం",
+		"रुको",
+		"रुकिए",
+		"एक मिनट",
+		"ठहरो"
+	],
+	ctlResume: [
+		"continue",
+		"resume",
+		"go on",
+		"carry on",
+		"keep going",
+		"కొనసాగించు",
+		"కొనసాగించండి",
+		"కానివ్వు",
+		"जारी रखो",
+		"आगे बढ़ो",
+		"चालू रखो"
+	],
+	ctlStop: [
+		"stop",
+		"stop explaining",
+		"cancel",
+		"enough",
+		"that is enough",
+		"ఆపు",
+		"ఆపండి",
+		"చాలు",
+		"బస్",
+		"बस",
+		"बंद करो",
+		"रोको",
+		"रहने दो"
+	],
+	langTe: [
+		"in telugu",
+		"తెలుగులో",
+		"తెలుగు లో",
+		"तेलुगु में"
+	],
+	langHi: [
+		"in hindi",
+		"హిందీలో",
+		"హిందీ లో",
+		"हिंदी में",
+		"हिन्दी में"
+	],
+	langEn: [
+		"in english",
+		"ఇంగ్లీష్‌లో",
+		"ఇంగ్లీషులో",
+		"ఇంగ్లీష్ లో",
+		"अंग्रेजी में",
+		"इंग्लिश में"
+	],
+	qIdentify: [
+		"what is",
+		"what's",
+		"whats",
+		"which part",
+		"what part",
+		"identify",
+		"ఏమిటి",
+		"ఏంటి",
+		"ఏ భాగం",
+		"क्या है",
+		"कौन सा",
+		"कौनसा"
+	]
+};
+var INDIC = /[ऀ-෿]/;
+function has(text, words) {
+	const padded = ` ${text} `;
+	return words.some((w) => {
+		const n = normalise(w);
+		if (!n) return false;
+		return INDIC.test(n) ? padded.includes(` ${n}`) : padded.includes(` ${n} `);
+	});
+}
+/** Whole-word match (used for very short words that would otherwise match inside others). */
+function hasWord(text, words) {
+	const tokens = new Set(text.split(" "));
+	return words.some((w) => tokens.has(normalise(w)));
+}
+/** Removes model phrases ("this gearbox", "the entire bridge") so their determiner is not taken
+*  as a reference to a part (Task V5: "what is its role in the entire gearbox" is about a part). */
+function withoutModelPhrases(text) {
+	let out = ` ${text} `;
+	const nouns = W.modelNoun.map(normalise).sort((a, b) => b.length - a.length);
+	for (const n of nouns) {
+		for (const d of W.determiner.map(normalise)) out = out.split(` ${d} ${n}`).join(" ");
+		out = out.split(` ${n}`).join(" ");
+	}
+	return out.replace(/\s+/g, " ").trim();
+}
+function containsPhrase(text, phrase) {
+	const padded = ` ${text} `;
+	return INDIC.test(phrase) ? padded.includes(` ${phrase}`) : padded.includes(` ${phrase} `);
+}
+/** Best-matching parts of the loaded model (longest phrase wins; ties = ambiguity). */
+function matchParts(text, lexicon) {
+	let best = 0;
+	let ids = /* @__PURE__ */ new Set();
+	for (const entry of lexicon) for (const phrase of entry.phrases) if (phrase.length >= best && containsPhrase(text, phrase)) {
+		if (phrase.length > best) {
+			best = phrase.length;
+			ids = /* @__PURE__ */ new Set();
+		}
+		ids.add(entry.componentId);
+	}
+	return {
+		ids: [...ids],
+		length: best
+	};
+}
+/**
+* Task V4: every part mention in the text, grouped by phrase. "from the deck to the piers" gives
+* two groups (a path); "the planet gear" gives one group of three parts (ambiguous). Phrases inside
+* a longer matched phrase ("gear" in "sun gear") are ignored.
+*/
+function mentionGroups(text, lexicon) {
+	const byPhrase = /* @__PURE__ */ new Map();
+	for (const entry of lexicon) for (const phrase of entry.phrases) if (containsPhrase(text, phrase)) byPhrase.set(phrase, (byPhrase.get(phrase) ?? /* @__PURE__ */ new Set()).add(entry.componentId));
+	const phrases = [...byPhrase.keys()];
+	const kept = phrases.filter((ph) => !phrases.some((o) => o !== ph && o.length > ph.length && o.includes(ph)));
+	const groups = /* @__PURE__ */ new Map();
+	for (const ph of kept) {
+		const ids = [...byPhrase.get(ph)].sort();
+		groups.set(ids.join("|"), ids);
+	}
+	return [...groups.values()];
+}
+function matchForeign(text, foreign) {
+	let best = null;
+	for (const f of foreign) if (containsPhrase(text, f.phrase) && (!best || f.phrase.length > best.phrase.length)) best = f;
+	return best;
+}
+var commands = (intent, cmds, partId) => ({
+	kind: "commands",
+	intent,
+	commands: cmds,
+	partId
+});
+function parseVoiceCommand(transcript, ctx) {
+	const text = normalise(transcript);
+	if (!text) return { kind: "noMatch" };
+	if (ctx.teachingActive && matchParts(text, ctx.lexicon).ids.length === 0 && !has(text, W.qExplain) && !has(text, W.qHow) && !has(text, W.qPurpose) && !has(text, W.qFailure)) {
+		if (has(text, W.ctlResume)) return {
+			kind: "teachControl",
+			action: "resume"
+		};
+		if (has(text, W.ctlPause)) return {
+			kind: "teachControl",
+			action: "pause"
+		};
+		if (has(text, W.ctlStop)) return {
+			kind: "teachControl",
+			action: "stop"
+		};
+	}
+	if (has(text, W.home)) return commands("home", [{ type: "workspace.goHome" }]);
+	const lessonWord = has(text, W.lesson);
+	if (lessonWord && has(text, W.exit) && ctx.lessonActive) return commands("lessonExit", [{ type: "lesson.exit" }]);
+	if (lessonWord) return commands("lessonStart", [{ type: "lesson.start" }]);
+	if (ctx.lessonActive) {
+		if (has(text, W.previous)) return commands("lessonPrev", [{ type: "lesson.previous" }]);
+		if (has(text, W.next)) return commands("lessonNext", [{ type: "lesson.next" }]);
+	}
+	if (has(text, W.auto)) return commands("autoOrbit", [{
+		type: "camera.autoOrbit",
+		enabled: !(has(text, W.pause) || has(text, [
+			"off",
+			"disable",
+			"ఆఫ్",
+			"ऑफ"
+		]))
+	}]);
+	const animWord = has(text, W.animation);
+	if (has(text, W.normalSpeed)) return commands("animSpeed", [{
+		type: "animation.setSpeed",
+		speed: 1
+	}]);
+	if ((animWord || !has(text, W.zoom)) && has(text, W.slower) && !has(text, W.move)) return commands("animSpeed", [{
+		type: "animation.setSpeed",
+		speed: .5
+	}]);
+	if ((animWord || !has(text, W.zoom)) && has(text, W.faster) && !has(text, W.move)) return commands("animSpeed", [{
+		type: "animation.setSpeed",
+		speed: 2
+	}]);
+	if (animWord && has(text, W.pause)) return commands("animPause", [{ type: "animation.pause" }]);
+	if (animWord && has(text, W.play)) return commands("animPlay", [{ type: "animation.play" }]);
+	if (has(text, W.putBack) && !has(text, W.together)) return putBack(ctx);
+	if (has(text, W.highlightWord) && has(text, W.clear)) return commands("clearHighlight", [{ type: "component.clearHighlight" }]);
+	if (has(text, W.all) && (has(text, W.show) || has(text, W.unhide))) return commands("showAll", [{ type: "component.showAll" }]);
+	if (has(text, W.assemble)) return commands("assemble", [{ type: "assembly.restore" }]);
+	if (has(text, W.bottomView) || /(^| )(show|see|view|look at)( me)? the bottom( of the \S+)?$/.test(text)) return {
+		kind: "unavailable",
+		intent: "view",
+		reason: "noBottomView"
+	};
+	const parts = matchParts(text, ctx.lexicon);
+	const foreign = matchForeign(text, ctx.foreignParts);
+	const partText = withoutModelPhrases(text);
+	const refersToThis = has(partText, W.thisRef) || hasWord(partText, W.thisWord);
+	const foreignWins = Boolean(foreign && foreign.phrase.length > parts.length);
+	const teachTopic = has(text, W.teachTopic);
+	const question = has(text, W.qFailure) ? "failure" : has(text, W.qExplain) ? "explain" : has(text, W.qHow) || teachTopic ? "howWorks" : has(text, W.qPurpose) ? "purpose" : has(text, W.qIdentify) ? "identify" : null;
+	const language = has(text, W.langTe) ? "te-IN" : has(text, W.langHi) ? "hi-IN" : has(text, W.langEn) ? "en-IN" : void 0;
+	const withLang = (o) => language ? {
+		...o,
+		language
+	} : o;
+	const resolve = () => resolveComponentReference({
+		explicitIds: parts.ids,
+		contextual: refersToThis
+	}, resolverScene(ctx));
+	const groups = question ? mentionGroups(text, ctx.lexicon) : [];
+	if (question !== null && question !== "identify" && !foreignWins && (groups.length > 1 || parts.ids.length === 0 && !refersToThis && (has(text, W.modelNoun) || teachTopic))) return withLang({
+		kind: "question",
+		question,
+		...groups.length > 1 ? { mentionedIds: [...new Set(groups.flat())] } : {}
+	});
+	if (question && (parts.ids.length > 0 || refersToThis || foreignWins)) {
+		if (foreignWins) return {
+			kind: "unknownPart",
+			intent: "ask",
+			spoken: foreign.phrase,
+			belongsTo: foreign.modelName
+		};
+		const r = resolve();
+		if (r.kind === "ambiguous") return {
+			kind: "ambiguous",
+			intent: "ask",
+			options: r.options
+		};
+		if (r.kind === "needsClarification") return {
+			kind: "needsSelection",
+			intent: "ask"
+		};
+		return withLang({
+			kind: "question",
+			question,
+			partId: r.componentId,
+			via: r.via
+		});
+	}
+	if (has(text, W.related) && (parts.ids.length > 0 || refersToThis || foreignWins)) {
+		if (foreignWins) return {
+			kind: "unknownPart",
+			intent: "related",
+			spoken: foreign.phrase,
+			belongsTo: foreign.modelName
+		};
+		const r = resolve();
+		if (r.kind === "ambiguous") return {
+			kind: "ambiguous",
+			intent: "related",
+			options: r.options
+		};
+		if (r.kind === "needsClarification") return {
+			kind: "needsSelection",
+			intent: "related"
+		};
+		const related = ctx.scene?.components.find((c) => c.id === r.componentId)?.relatedComponentIds ?? [];
+		if (related.length === 0) return {
+			kind: "unavailable",
+			intent: "related",
+			reason: "noRelationships",
+			partId: r.componentId
+		};
+		return {
+			kind: "commands",
+			intent: "related",
+			partId: r.componentId,
+			via: r.via,
+			commands: [{
+				type: "component.select",
+				componentId: r.componentId
+			}, {
+				type: "component.highlight",
+				componentIds: related
+			}]
+		};
+	}
+	const partIntent = has(text, W.unhide) ? "show" : has(text, W.hide) ? "hide" : has(text, W.isolate) && !has(text, W.explode) ? "isolate" : has(text, W.focus) || has(text, W.zoom) && !has(text, W.out) && (parts.ids.length > 0 || refersToThis) ? "focus" : has(text, W.select) ? "select" : null;
+	if (foreign && foreign.phrase.length > parts.length) return {
+		kind: "unknownPart",
+		intent: partIntent ?? "select",
+		spoken: foreign.phrase,
+		belongsTo: foreign.modelName
+	};
+	if (parts.ids.length > 0 || partIntent && refersToThis) {
+		if (parts.ids.length > 1 && (partIntent === "hide" || partIntent === "show")) return commands(partIntent, [{
+			type: "component.visibility",
+			componentIds: parts.ids,
+			visible: partIntent === "show"
+		}]);
+		const intent = partIntent ?? "select";
+		const r = resolve();
+		if (r.kind === "ambiguous") return {
+			kind: "ambiguous",
+			intent,
+			options: r.options
+		};
+		if (r.kind === "needsClarification") return {
+			kind: "needsSelection",
+			intent
+		};
+		const target = r.componentId;
+		const withVia = (o) => o.kind === "commands" ? {
+			...o,
+			via: r.via
+		} : o;
+		switch (intent) {
+			case "isolate": return withVia(commands(intent, [
+				{
+					type: "component.select",
+					componentId: target
+				},
+				{
+					type: "component.isolate",
+					componentId: target
+				},
+				{
+					type: "component.focus",
+					componentId: target
+				}
+			], target));
+			case "focus": return withVia(commands(intent, [{
+				type: "component.select",
+				componentId: target
+			}, {
+				type: "component.focus",
+				componentId: target
+			}], target));
+			case "hide": return withVia(commands(intent, [{
+				type: "component.visibility",
+				componentIds: [target],
+				visible: false
+			}], target));
+			case "show": return withVia(commands(intent, [{
+				type: "component.visibility",
+				componentIds: [target],
+				visible: true
+			}], target));
+			default: return withVia(commands("select", [{
+				type: "component.select",
+				componentId: target
+			}], target));
+		}
+	}
+	if (partIntent && !refersToThis && (partIntent === "select" || partIntent === "isolate" || partIntent === "hide")) return {
+		kind: "unknownPart",
+		intent: partIntent,
+		spoken: ""
+	};
+	if (has(text, W.explode)) return commands("explode", [{
+		type: "assembly.explode",
+		factor: .75
+	}]);
+	if (has(text, W.zoom) || has(text, W.bigger) || has(text, W.smaller)) return commands("zoom", [{
+		type: "camera.zoom",
+		direction: has(text, W.out) || has(text, W.smaller) ? "out" : "in"
+	}]);
+	const dir = has(text, W.left) ? "left" : has(text, W.right) ? "right" : has(text, W.up) ? "up" : has(text, W.down) ? "down" : null;
+	if (has(text, W.rotate)) {
+		const [yawDeg, pitchDeg] = {
+			left: [30, 0],
+			right: [-30, 0],
+			up: [0, 20],
+			down: [0, -20]
+		}[dir ?? "right"];
+		return commands("orbit", [{
+			type: "camera.orbit",
+			yawDeg,
+			pitchDeg
+		}]);
+	}
+	if (has(text, W.move) && dir) return commands("pan", [{
+		type: "camera.pan",
+		direction: dir
+	}]);
+	if (has(text, W.reset)) return commands("reset", [{ type: "camera.reset" }]);
+	if (has(text, W.isometric)) return commands("view", [{
+		type: "camera.view",
+		view: "isometric"
+	}]);
+	if (has(text, W.back)) return commands("view", [{
+		type: "camera.view",
+		view: "back"
+	}]);
+	if (has(text, W.top)) return commands("view", [{
+		type: "camera.view",
+		view: "top"
+	}]);
+	if (has(text, W.front)) return commands("view", [{
+		type: "camera.view",
+		view: "front"
+	}]);
+	if (dir === "left" || dir === "right") return has(text, W.side) ? commands("view", [{
+		type: "camera.view",
+		view: dir
+	}]) : commands("pan", [{
+		type: "camera.pan",
+		direction: dir
+	}]);
+	if (dir === "up" || dir === "down") return commands("pan", [{
+		type: "camera.pan",
+		direction: dir
+	}]);
+	if (has(text, W.pause)) return commands("animPause", [{ type: "animation.pause" }]);
+	if (has(text, W.play)) return commands("animPlay", [{ type: "animation.play" }]);
+	return { kind: "noMatch" };
+}
+/** Scene facts for the resolver: the live snapshot, or (V2 callers) just the selection. */
+function resolverScene(ctx) {
+	if (ctx.scene) return ctx.scene;
+	return {
+		components: [...new Set(ctx.lexicon.map((e) => e.componentId))].map((id) => ({
+			id,
+			name: id,
+			role: null,
+			visible: true,
+			relatedComponentIds: []
+		})),
+		pointer: {
+			status: "unavailable",
+			reason: "No scene snapshot."
+		},
+		selectedComponentId: ctx.selectedComponentId,
+		lastDiscussedComponentId: {
+			status: "unavailable",
+			reason: "No scene snapshot."
+		}
+	};
+}
+/** "Put it back": reverses the most specific change visible in the scene. */
+function putBack(ctx) {
+	const scene = ctx.scene;
+	if (!scene) return commands("assemble", [{ type: "assembly.restore" }]);
+	const isolated = scene.isolatedComponentId.status === "known" ? scene.isolatedComponentId.value : null;
+	if (isolated) return commands("putBack", [{
+		type: "component.isolate",
+		componentId: null
+	}], isolated);
+	if (scene.hiddenComponentIds.length > 0) return commands("putBack", [{
+		type: "component.visibility",
+		componentIds: [...scene.hiddenComponentIds],
+		visible: true
+	}]);
+	if (scene.exploded.active) return commands("putBack", [{ type: "assembly.restore" }]);
+	if ((scene.highlightedComponentIds.status === "known" ? scene.highlightedComponentIds.value : []).length > 0) return commands("putBack", [{ type: "component.clearHighlight" }]);
+	return {
+		kind: "unavailable",
+		intent: "putBack",
+		reason: "nothingToPutBack"
+	};
+}
+// src/services/voice/voiceReplies.ts
+var FULLY_SUPPORTED_LANGUAGES = [
+	"en-IN",
+	"te-IN",
+	"hi-IN"
+];
+var EN = {
+	zoom: "Zooming.",
+	zoomIn: "Zooming in.",
+	zoomOut: "Zooming out.",
+	pan: "Moving the view {dir}.",
+	orbit: "Rotating {dir}.",
+	view: "Showing the {view} view.",
+	reset: "Back to the original view.",
+	select: "Selected {part}.",
+	focus: "Showing {part}.",
+	isolate: "Showing only {part}.",
+	hide: "Hid {part}.",
+	show: "Showing {part} again.",
+	showAll: "Showing all parts.",
+	explode: "Separating the assembly.",
+	assemble: "Putting the assembly back together.",
+	animPlay: "Animation playing.",
+	animPause: "Animation paused.",
+	animSpeed: "Animation speed {speed}×.",
+	autoOrbit: "Auto-rotation on.",
+	autoOrbitOff: "Auto-rotation off.",
+	lessonStart: "Starting the guided lesson.",
+	lessonNext: "Next step.",
+	lessonPrev: "Previous step.",
+	lessonExit: "Lesson closed.",
+	home: "Going to the home page.",
+	deferred: "Your hand or mouse is moving the view. I will do it when you stop.",
+	expired: "Your hand kept moving, so I skipped that.",
+	needsSelection: "Which part do you mean? Point at it, select it, or say its name.",
+	related: "Highlighting the parts connected to {part}: {list}.",
+	clearHighlight: "Highlight cleared.",
+	putBack: "Put back as it was.",
+	ask: "Found {part}.",
+	identify: "That is the {part}: {role}.",
+	notTaughtYet: "That is the {part}. Explaining it is not available yet.",
+	questionNoPart: "Explanations are not available yet.",
+	teachPreparing: "Preparing an explanation of {part}…",
+	emptyTranscript: "I didn't catch that. Could you say it again?",
+	noBottomView: "The camera stays above the ground grid, so there is no bottom view. Try the top or front view.",
+	interpreting: "Let me make sure I understood…",
+	unsupportedRequest: "I can't do that in this viewer. You can ask me to explain a part, or to zoom, turn or show a view.",
+	teachPaused: "Paused. Say “continue” when you are ready.",
+	teachResumed: "Continuing.",
+	teachStopped: "Stopped the explanation.",
+	teachFallback: "The AI teacher is not available right now, so here is what the model data says.",
+	teachPreparingModel: "Preparing an explanation of the {model}…",
+	noRelationships: "No connections are recorded for {part} in this model.",
+	nothingToPutBack: "Nothing is separated, hidden or highlighted right now.",
+	ambiguous: "Which one do you mean: {options}?",
+	unknownPart: "{part} is not part of the {model}.",
+	unknownPartOtherModel: "{part} belongs to the {other}, not the {model}.",
+	unknownPartGeneric: "I could not find that part in the {model}.",
+	noMatch: "Sorry, I didn't understand. Try “zoom in” or “select the sun gear”.",
+	cannot: "Sorry, I can't do that here.",
+	UNSUPPORTED_ANIMATION: "The {model} has no animation to play.",
+	UNSUPPORTED_EXPLODED_VIEW: "The {model} has no exploded view.",
+	LESSON_NOT_ACTIVE: "No lesson is running. Say “start lesson” first.",
+	NO_LESSON: "There is no guided lesson for the {model} yet.",
+	VIEWER_NOT_READY: "The 3D view is still loading.",
+	UNKNOWN_COMPONENT: "That part is not in the {model}.",
+	INVALID_ARGUMENT: "That isn't available here."
+};
+var TE = {
+	zoom: "జూమ్ చేస్తున్నాను.",
+	zoomIn: "దగ్గరగా చూపిస్తున్నాను.",
+	zoomOut: "దూరంగా చూపిస్తున్నాను.",
+	pan: "వ్యూని {dir} జరుపుతున్నాను.",
+	orbit: "{dir} తిప్పుతున్నాను.",
+	view: "{view} వ్యూ చూపిస్తున్నాను.",
+	reset: "మొదటి వ్యూకి వచ్చాం.",
+	select: "{part} ఎంచుకున్నాను.",
+	focus: "{part} చూపిస్తున్నాను.",
+	isolate: "{part} మాత్రమే చూపిస్తున్నాను.",
+	hide: "{part} దాచాను.",
+	show: "{part} మళ్లీ చూపిస్తున్నాను.",
+	showAll: "అన్ని భాగాలు చూపిస్తున్నాను.",
+	explode: "భాగాలను విడదీస్తున్నాను.",
+	assemble: "భాగాలను మళ్లీ కలుపుతున్నాను.",
+	animPlay: "యానిమేషన్ మొదలైంది.",
+	animPause: "యానిమేషన్ ఆపాను.",
+	animSpeed: "యానిమేషన్ వేగం {speed} రెట్లు.",
+	autoOrbit: "ఆటో రొటేషన్ ఆన్.",
+	autoOrbitOff: "ఆటో రొటేషన్ ఆఫ్.",
+	lessonStart: "పాఠం మొదలుపెడుతున్నాను.",
+	lessonNext: "తర్వాతి దశ.",
+	lessonPrev: "ముందటి దశ.",
+	lessonExit: "పాఠం ముగించాను.",
+	home: "హోమ్ పేజీకి వెళ్తున్నాను.",
+	deferred: "మీ చేయి లేదా మౌస్ వ్యూని కదుపుతోంది. మీరు ఆపగానే చేస్తాను.",
+	expired: "మీ చేయి కదులుతూనే ఉంది, అందుకే అది వదిలేశాను.",
+	needsSelection: "ఏ భాగం అంటున్నారు? దాన్ని చూపించండి, ఎంచుకోండి లేదా పేరు చెప్పండి.",
+	related: "{part} కి కనెక్ట్ అయిన భాగాలు హైలైట్ చేశాను: {list}.",
+	clearHighlight: "హైలైట్ తీసేశాను.",
+	putBack: "మళ్లీ యథాస్థితికి తెచ్చాను.",
+	ask: "{part} గుర్తించాను.",
+	identify: "ఇది {part}: {role}.",
+	notTaughtYet: "ఇది {part}. దీని వివరణ ఇంకా అందుబాటులో లేదు.",
+	questionNoPart: "వివరణలు ఇంకా అందుబాటులో లేవు.",
+	teachPreparing: "{part} వివరణ సిద్ధం చేస్తున్నాను…",
+	emptyTranscript: "నాకు సరిగ్గా వినిపించలేదు. ఇంకోసారి చెప్పగలరా?",
+	noBottomView: "కెమెరా గ్రౌండ్ గ్రిడ్ పైనే ఉంటుంది, కాబట్టి కింది వ్యూ లేదు. టాప్ లేదా ఫ్రంట్ వ్యూ చూడండి.",
+	interpreting: "మీరు అడిగింది సరిగ్గా అర్థం చేసుకుంటున్నాను…",
+	unsupportedRequest: "ఈ వ్యూయర్‌లో అది చేయలేను. ఒక భాగాన్ని వివరించమని, లేదా జూమ్, తిప్పడం, వ్యూ చూపించమని అడగండి.",
+	teachPaused: "ఆపాను. సిద్ధమైనప్పుడు “కొనసాగించు” అనండి.",
+	teachResumed: "కొనసాగిస్తున్నాను.",
+	teachStopped: "వివరణ ఆపేశాను.",
+	teachFallback: "AI టీచర్ ఇప్పుడు అందుబాటులో లేదు, కాబట్టి మోడల్ డేటాలో ఉన్నది చెబుతున్నాను.",
+	teachPreparingModel: "{model} వివరణ సిద్ధం చేస్తున్నాను…",
+	noRelationships: "ఈ మోడల్‌లో {part} కి ఏ కనెక్షన్లు నమోదు కాలేదు.",
+	nothingToPutBack: "ఇప్పుడు వేరు చేసినది, దాచినది లేదా హైలైట్ చేసినది ఏదీ లేదు.",
+	ambiguous: "ఏది అంటున్నారు: {options}?",
+	unknownPart: "{part} ఈ {model} లో లేదు.",
+	unknownPartOtherModel: "{part} {other} లో ఉంది, ఈ {model} లో లేదు.",
+	unknownPartGeneric: "ఆ భాగం ఈ {model} లో కనిపించలేదు.",
+	noMatch: "క్షమించండి, అర్థం కాలేదు. “జూమ్ ఇన్” లేదా “సన్ గేర్ సెలెక్ట్ చేయి” అని ప్రయత్నించండి.",
+	cannot: "క్షమించండి, ఇక్కడ అది చేయలేను.",
+	UNSUPPORTED_ANIMATION: "ఈ {model} కి యానిమేషన్ లేదు.",
+	UNSUPPORTED_EXPLODED_VIEW: "ఈ {model} కి ఎక్స్‌ప్లోడెడ్ వ్యూ లేదు.",
+	LESSON_NOT_ACTIVE: "ఏ పాఠం నడవడం లేదు. ముందు “పాఠం మొదలుపెట్టు” అనండి.",
+	NO_LESSON: "ఈ {model} కి ఇంకా పాఠం లేదు.",
+	VIEWER_NOT_READY: "3D వ్యూ ఇంకా లోడ్ అవుతోంది.",
+	UNKNOWN_COMPONENT: "ఆ భాగం ఈ {model} లో లేదు.",
+	INVALID_ARGUMENT: "అది ఇక్కడ అందుబాటులో లేదు."
+};
+var HI = {
+	zoom: "ज़ूम कर रही हूँ।",
+	zoomIn: "पास से दिखा रही हूँ।",
+	zoomOut: "दूर से दिखा रही हूँ।",
+	pan: "व्यू को {dir} खिसका रही हूँ।",
+	orbit: "{dir} घुमा रही हूँ।",
+	view: "{view} व्यू दिखा रही हूँ।",
+	reset: "पहले वाला व्यू।",
+	select: "{part} चुना।",
+	focus: "{part} दिखा रही हूँ।",
+	isolate: "सिर्फ़ {part} दिखा रही हूँ।",
+	hide: "{part} छुपा दिया।",
+	show: "{part} फिर से दिखा रही हूँ।",
+	showAll: "सारे पुर्ज़े दिखा रही हूँ।",
+	explode: "पुर्ज़े अलग कर रही हूँ।",
+	assemble: "पुर्ज़े वापस जोड़ रही हूँ।",
+	animPlay: "एनिमेशन चल रहा है।",
+	animPause: "एनिमेशन रोका।",
+	animSpeed: "एनिमेशन की गति {speed} गुना।",
+	autoOrbit: "ऑटो रोटेशन चालू।",
+	autoOrbitOff: "ऑटो रोटेशन बंद।",
+	lessonStart: "पाठ शुरू कर रही हूँ।",
+	lessonNext: "अगला चरण।",
+	lessonPrev: "पिछला चरण।",
+	lessonExit: "पाठ बंद किया।",
+	home: "होम पेज पर जा रही हूँ।",
+	deferred: "आपका हाथ या माउस व्यू घुमा रहा है। आप रुकेंगे तो कर दूँगी।",
+	expired: "आपका हाथ चलता रहा, इसलिए वह छोड़ दिया।",
+	needsSelection: "आप कौन सा पुर्ज़ा कह रहे हैं? उस पर इशारा करें, उसे चुनें या उसका नाम बोलें।",
+	related: "{part} से जुड़े पुर्ज़े हाइलाइट किए: {list}।",
+	clearHighlight: "हाइलाइट हटा दिया।",
+	putBack: "वापस पहले जैसा कर दिया।",
+	ask: "{part} पहचाना।",
+	identify: "यह {part} है: {role}।",
+	notTaughtYet: "यह {part} है। इसकी व्याख्या अभी उपलब्ध नहीं है।",
+	questionNoPart: "व्याख्याएँ अभी उपलब्ध नहीं हैं।",
+	teachPreparing: "{part} की व्याख्या तैयार कर रही हूँ…",
+	emptyTranscript: "मुझे ठीक से सुनाई नहीं दिया। क्या आप फिर से बोल सकते हैं?",
+	noBottomView: "कैमरा ज़मीन की ग्रिड के ऊपर ही रहता है, इसलिए नीचे का व्यू नहीं है। टॉप या फ्रंट व्यू देखिए।",
+	interpreting: "आपकी बात ठीक से समझ रही हूँ…",
+	unsupportedRequest: "यह इस व्यूअर में नहीं हो सकता। किसी पुर्ज़े को समझाने, या ज़ूम, घुमाने या व्यू दिखाने को कहिए।",
+	teachPaused: "रोक दिया। तैयार हों तो “जारी रखो” बोलिए।",
+	teachResumed: "जारी रख रही हूँ।",
+	teachStopped: "व्याख्या रोक दी।",
+	teachFallback: "AI टीचर अभी उपलब्ध नहीं है, इसलिए मॉडल डेटा के आधार पर बता रही हूँ।",
+	teachPreparingModel: "{model} की व्याख्या तैयार कर रही हूँ…",
+	noRelationships: "इस मॉडल में {part} के कोई कनेक्शन दर्ज नहीं हैं।",
+	nothingToPutBack: "अभी कुछ भी अलग, छुपा या हाइलाइट नहीं है।",
+	ambiguous: "आप कौन सा कह रहे हैं: {options}?",
+	unknownPart: "{part} इस {model} में नहीं है।",
+	unknownPartOtherModel: "{part} {other} का हिस्सा है, इस {model} का नहीं।",
+	unknownPartGeneric: "वह पुर्ज़ा इस {model} में नहीं मिला।",
+	noMatch: "माफ़ कीजिए, समझ नहीं आया। “ज़ूम इन” या “सन गियर सेलेक्ट करो” बोलकर देखिए।",
+	cannot: "माफ़ कीजिए, यहाँ यह नहीं हो सकता।",
+	UNSUPPORTED_ANIMATION: "इस {model} में कोई एनिमेशन नहीं है।",
+	UNSUPPORTED_EXPLODED_VIEW: "इस {model} का एक्सप्लोडेड व्यू नहीं है।",
+	LESSON_NOT_ACTIVE: "कोई पाठ नहीं चल रहा। पहले “पाठ शुरू करो” बोलिए।",
+	NO_LESSON: "इस {model} का अभी कोई पाठ नहीं है।",
+	VIEWER_NOT_READY: "3D व्यू अभी लोड हो रहा है।",
+	UNKNOWN_COMPONENT: "वह पुर्ज़ा इस {model} में नहीं है।",
+	INVALID_ARGUMENT: "यह यहाँ उपलब्ध नहीं है।"
+};
+var WORDS = {
+	"en-IN": {
+		left: "left",
+		right: "right",
+		up: "up",
+		down: "down",
+		back: "back",
+		front: "front",
+		top: "top",
+		isometric: "isometric",
+		vleft: "left side",
+		vright: "right side",
+		or: " or "
+	},
+	"te-IN": {
+		left: "ఎడమకు",
+		right: "కుడికి",
+		up: "పైకి",
+		down: "కిందకి",
+		back: "వెనుక",
+		front: "ముందు",
+		top: "పై",
+		isometric: "ఐసోమెట్రిక్",
+		vleft: "ఎడమ వైపు",
+		vright: "కుడి వైపు",
+		or: " లేదా "
+	},
+	"hi-IN": {
+		left: "बाएं",
+		right: "दाएं",
+		up: "ऊपर",
+		down: "नीचे",
+		back: "पीछे का",
+		front: "सामने का",
+		top: "ऊपर का",
+		isometric: "आइसोमेट्रिक",
+		vleft: "बाईं तरफ़ का",
+		vright: "दाईं तरफ़ का",
+		or: " या "
+	}
+};
+var TABLES = {
+	"en-IN": EN,
+	"te-IN": TE,
+	"hi-IN": HI
+};
+/** Replies are localised for en/te/hi; any other (beta) language uses English. */
+function replyLanguage(language) {
+	return FULLY_SUPPORTED_LANGUAGES.includes(language) ? language : "en-IN";
+}
+function reply(key, language, vars = {}) {
+	const lang = replyLanguage(language);
+	const table = TABLES[lang];
+	const words = WORDS[lang];
+	return (table[key] ?? table.cannot).replace("{part}", vars.part ?? "").replace("{model}", vars.model ?? "").replace("{other}", vars.other ?? "").replace("{options}", (vars.options ?? []).join(words.or)).replace("{dir}", vars.dir ? words[vars.dir] ?? vars.dir : "").replace("{view}", vars.view ? words[`v${vars.view}`] ?? words[vars.view] ?? vars.view : "").replace("{speed}", vars.speed !== void 0 ? String(vars.speed) : "").replace("{role}", vars.role ?? "").replace("{list}", (vars.list ?? []).join(", ")).replace(/\s+/g, " ").trim();
+}
+/** All keys every fully-supported language must define (used by tests). */
+var REPLY_KEYS = Object.keys(EN);
+var REPLY_TABLES = TABLES;
+// src/services/scene/componentRelationships.ts
+/**
+* Component relationship queries (Task V3). Reads the relationships each model declares in its
+* component metadata (see models/*Relationships.ts) — never invents links. Every returned ID is
+* checked against the model's own component list.
+*/
+/** Direct relationships of a component in this model ([] if unknown component or none recorded). */
+function getComponentRelationships(model, componentId) {
+	const valid = new Set(model.getAllComponentIds());
+	if (!valid.has(componentId)) return [];
+	return (model.getComponentMetadata(componentId)?.relationships ?? []).filter((r) => valid.has(r.targetComponentId) && r.targetComponentId !== componentId);
+}
+/** IDs of directly related components (optionally only some relationship types), without duplicates. */
+function getRelatedComponentIds(model, componentId, types) {
+	const out = [];
+	for (const r of getComponentRelationships(model, componentId)) {
+		if (types && !types.includes(r.relationshipType)) continue;
+		if (!out.includes(r.targetComponentId)) out.push(r.targetComponentId);
+	}
+	return out;
+}
+/** Components reachable within `depth` relationship hops (breadth-first), excluding the start. */
+function getNeighbourhood(model, componentId, depth = 1) {
+	const seen = /* @__PURE__ */ new Set([componentId]);
+	let frontier = [componentId];
+	const out = [];
+	for (let d = 0; d < depth && frontier.length > 0; d++) {
+		const next = [];
+		for (const id of frontier) for (const n of getRelatedComponentIds(model, id)) {
+			if (seen.has(n)) continue;
+			seen.add(n);
+			out.push(n);
+			next.push(n);
+		}
+		frontier = next;
+	}
+	return out;
+}
+/** Checks every relationship of a model: valid targets, no self links, and matching inverse edges. */
+function validateModelRelationships(model) {
+	const ids = model.getAllComponentIds();
+	const errors = [];
+	const without = [];
+	for (const id of ids) {
+		const meta = model.getComponentMetadata(id);
+		if (!meta) continue;
+		const rels = meta.relationships ?? [];
+		if (rels.length === 0) without.push(id);
+		errors.push(...validateComponentRelationships(meta, ids).errors);
+		for (const r of rels) {
+			const inverse = INVERSE_RELATIONSHIP[r.relationshipType];
+			if (!inverse) {
+				errors.push(`Component "${id}" uses unknown relationship type "${r.relationshipType}".`);
+				continue;
+			}
+			if (!(model.getComponentMetadata(r.targetComponentId)?.relationships ?? []).some((b) => b.targetComponentId === id && b.relationshipType === inverse)) errors.push(`"${id}" ${r.relationshipType} "${r.targetComponentId}" has no matching "${inverse}" entry.`);
+		}
+	}
+	return {
+		isValid: errors.length === 0,
+		errors,
+		componentsWithoutRelationships: without
+	};
+}
+var known$1 = (value) => ({
+	status: "known",
+	value
+});
+var unavailable = (reason) => ({
+	status: "unavailable",
+	reason
+});
+/** Keeps an ID only if it belongs to the loaded model (guards against stale references). */
+var inModel = (id, ids) => id && ids.has(id) ? id : null;
+function buildSceneSnapshot(ctx, model, extras = {}) {
+	const activeModel = model && ctx.modelId === model.id ? model : null;
+	const ids = activeModel ? ctx.componentIds : /* @__PURE__ */ new Set();
+	const ws = ctx.workspaceFacts;
+	const vf = ctx.viewerFacts;
+	const viewerUp = Boolean(vf && ctx.viewerReady);
+	const noViewer = "The 3D viewer is not ready.";
+	const hidden = (ws?.hiddenComponentIds ?? []).filter((id) => ids.has(id));
+	const isolated = viewerUp ? inModel(vf.isolatedComponentId, ids) : null;
+	const components = activeModel ? activeModel.getAllComponentIds().map((id) => {
+		const meta = activeModel.getComponentMetadata(id);
+		return {
+			id,
+			name: meta?.name ?? id,
+			role: meta?.role ?? null,
+			visible: !hidden.includes(id) && (!isolated || isolated === id),
+			relatedComponentIds: getRelatedComponentIds(activeModel, id)
+		};
+	}) : [];
+	const explodedFactor = ws?.explodedFactor ?? 0;
+	const lessonActive = ctx.lesson.active;
+	const actions = [];
+	if (activeModel) {
+		actions.push("component.select", "component.visibility", "component.showAll");
+		if (ctx.viewerReady) {
+			actions.push("camera.orbit", "camera.pan", "camera.zoom", "camera.view", "camera.reset", "camera.autoOrbit", "component.focus", "component.isolate", "component.highlight", "component.clearHighlight");
+			if (ctx.animationIds.length > 0) actions.push("animation.play", "animation.pause", "animation.setSpeed");
+		}
+		if (ctx.supportsExplodedView) actions.push("assembly.explode", "assembly.restore");
+		if (ctx.lesson.available) actions.push("lesson.start");
+		if (lessonActive) actions.push("lesson.next", "lesson.previous", "lesson.goTo", "lesson.exit");
+	}
+	if (ctx.registeredModelIds.size > 1) actions.push("workspace.switchModel");
+	actions.push("workspace.goHome");
+	const lastDiscussed = extras.lastDiscussed === void 0 ? unavailable("No conversation context.") : known$1(extras.lastDiscussed && activeModel && extras.lastDiscussed.modelId === activeModel.id ? inModel(extras.lastDiscussed.componentId, ids) : null);
+	return {
+		version: 1,
+		capturedAt: extras.now ?? Date.now(),
+		model: activeModel ? {
+			id: activeModel.id,
+			name: activeModel.name,
+			domain: activeModel.domain,
+			category: activeModel.category
+		} : null,
+		components,
+		selectedComponentId: inModel(ctx.selectedComponentId, ids),
+		pointer: viewerUp ? known$1({
+			componentId: inModel(vf.hoveredComponentId, ids),
+			source: inModel(vf.hoveredComponentId, ids) ? vf.hoverSource : null
+		}) : unavailable(noViewer),
+		focusedComponentId: viewerUp ? known$1(inModel(vf.focusedComponentId, ids)) : unavailable(noViewer),
+		hiddenComponentIds: hidden,
+		isolatedComponentId: viewerUp ? known$1(isolated) : unavailable(noViewer),
+		highlightedComponentIds: viewerUp ? known$1(vf.highlightedComponentIds.filter((id) => ids.has(id))) : unavailable(noViewer),
+		exploded: {
+			supported: ctx.supportsExplodedView,
+			factor: explodedFactor,
+			active: explodedFactor > 0
+		},
+		camera: viewerUp ? known$1({
+			...vf.camera,
+			settled: !vf.camera.transitioning && !vf.pendingCommand
+		}) : unavailable(noViewer),
+		animation: {
+			available: (activeModel?.animations ?? []).map((a) => ({
+				id: a.id,
+				label: a.label
+			})),
+			state: !viewerUp ? unavailable(noViewer) : ctx.animationIds.length === 0 ? known$1({
+				playing: false,
+				speed: vf.animation.speed
+			}) : known$1({ ...vf.animation })
+		},
+		lesson: {
+			available: ctx.lesson.available,
+			active: lessonActive,
+			stepCount: ctx.lesson.stepCount,
+			currentStep: lessonActive ? ctx.lesson.currentStep : null,
+			stepTitle: lessonActive ? ws?.lessonStepTitle ?? null : null,
+			stepComponentId: lessonActive ? inModel(ws?.lessonStepComponentId, ids) : null
+		},
+		lastDiscussedComponentId: lastDiscussed,
+		availableActions: actions
+	};
+}
+/** Convenience: snapshot of the scene behind a dispatcher. */
+function getSceneSnapshot(dispatcher, model, extras) {
+	return buildSceneSnapshot(dispatcher.getContext(), model, extras);
+}
+// src/services/voice/voiceSession.ts
+var lexiconCache = /* @__PURE__ */ new Map();
+function lexiconFor(model) {
+	let lex = lexiconCache.get(model.id);
+	if (!lex) {
+		lex = buildPartLexicon(model);
+		lexiconCache.set(model.id, lex);
+	}
+	return lex;
+}
+/** Parts that are NOT in the current model: other registered models' parts + common machine parts. */
+function foreignPartsFor(model, allModels) {
+	const own = new Set(lexiconFor(model).flatMap((e) => e.phrases));
+	const out = [];
+	for (const other of allModels) {
+		if (other.id === model.id) continue;
+		for (const entry of lexiconFor(other)) for (const phrase of entry.phrases) if (!own.has(phrase)) out.push({
+			phrase,
+			modelName: other.name
+		});
+	}
+	for (const phrase of COMMON_FOREIGN_PARTS) if (!own.has(phrase)) out.push({ phrase });
+	return out;
+}
+function partName(lexicon, id) {
+	return lexicon.find((e) => e.componentId === id)?.displayName ?? id ?? "";
+}
+function replyKeyForCommands(intent, cmds) {
+	const last = cmds[cmds.length - 1];
+	switch (last.type) {
+		case "camera.zoom": return {
+			key: last.direction === "in" ? "zoomIn" : "zoomOut",
+			vars: {}
+		};
+		case "camera.pan": return {
+			key: "pan",
+			vars: { dir: last.direction }
+		};
+		case "camera.orbit": return {
+			key: "orbit",
+			vars: { dir: last.yawDeg > 0 ? "left" : last.yawDeg < 0 ? "right" : (last.pitchDeg ?? 0) > 0 ? "up" : "down" }
+		};
+		case "camera.view": return {
+			key: "view",
+			vars: { view: last.view }
+		};
+		case "camera.autoOrbit": return {
+			key: last.enabled ? "autoOrbit" : "autoOrbitOff",
+			vars: {}
+		};
+		case "animation.setSpeed": return {
+			key: "animSpeed",
+			vars: { speed: last.speed }
+		};
+		default: return {
+			key: intent,
+			vars: {}
+		};
+	}
+}
+/**
+* Parse only (no dispatch, no side effects): would this transcript be understood? Used to pick
+* between transcripts of the same recording in different languages.
+*/
+function previewTurn(input) {
+	const scene = getSceneSnapshot(input.dispatcher, input.model, { lastDiscussed: input.lastDiscussed ?? null });
+	return parseVoiceCommand(input.transcript, {
+		lexicon: lexiconFor(input.model),
+		foreignParts: foreignPartsFor(input.model, input.allModels),
+		selectedComponentId: scene.selectedComponentId,
+		lessonActive: scene.lesson.active,
+		scene,
+		teachingActive: input.teachingActive
+	});
+}
+/** Script of a transcript -> the language it was most likely spoken in (null = Latin/unknown). */
+function scriptLanguage(text) {
+	const te = (text.match(/[ఀ-౿]/g) ?? []).length;
+	const hi = (text.match(/[ऀ-ॿ]/g) ?? []).length;
+	if (te === 0 && hi === 0) return null;
+	return te >= hi ? "te-IN" : "hi-IN";
+}
+function handleVoiceTurn(input) {
+	const { transcript, language, dispatcher, model } = input;
+	const lexicon = lexiconFor(model);
+	const scene = getSceneSnapshot(dispatcher, model, { lastDiscussed: input.lastDiscussed ?? null });
+	const outcome = parseVoiceCommand(transcript, {
+		lexicon,
+		foreignParts: foreignPartsFor(model, input.allModels),
+		selectedComponentId: scene.selectedComponentId,
+		lessonActive: scene.lesson.active,
+		scene,
+		teachingActive: input.teachingActive
+	});
+	const modelName = model.name;
+	const say = (key, vars = {}) => reply(key, language, {
+		model: modelName,
+		...vars
+	});
+	if (!transcript.trim()) return {
+		status: "needsInput",
+		caption: say("emptyTranscript"),
+		speak: true,
+		outcome,
+		records: []
+	};
+	const cameraOnly = outcome.kind === "commands" && outcome.commands.every((c) => c.type.startsWith("camera."));
+	if (outcome.kind === "commands" && !cameraOnly || outcome.kind === "question" || outcome.kind === "unavailable" && outcome.reason !== "noBottomView") input.onSupersede?.();
+	switch (outcome.kind) {
+		case "teachControl": return {
+			status: "control",
+			control: outcome.action,
+			outcome,
+			records: [],
+			speak: false,
+			caption: say(outcome.action === "pause" ? "teachPaused" : outcome.action === "resume" ? "teachResumed" : "teachStopped")
+		};
+		case "noMatch": return {
+			status: "rejected",
+			caption: say("noMatch"),
+			speak: true,
+			outcome,
+			records: []
+		};
+		case "needsSelection": return {
+			status: "needsInput",
+			caption: say("needsSelection"),
+			speak: true,
+			outcome,
+			records: []
+		};
+		case "ambiguous": return {
+			status: "needsInput",
+			caption: say("ambiguous", { options: outcome.options.map((id) => partName(lexicon, id)) }),
+			speak: true,
+			outcome,
+			records: []
+		};
+		case "question": {
+			if (input.teachingAvailable && outcome.question !== "identify") return {
+				status: "teach",
+				caption: say(outcome.partId ? "teachPreparing" : "teachPreparingModel", { part: partName(lexicon, outcome.partId) }),
+				speak: false,
+				outcome,
+				records: [],
+				discussedComponentId: outcome.partId,
+				teach: {
+					question: (input.questionText ?? transcript).trim(),
+					questionType: outcome.question,
+					targetComponentId: outcome.partId ?? null,
+					...outcome.language ? { language: outcome.language } : {}
+				}
+			};
+			if (!outcome.partId) return {
+				status: "unavailable",
+				caption: say("questionNoPart"),
+				speak: true,
+				outcome,
+				records: []
+			};
+			const part = partName(lexicon, outcome.partId);
+			if (outcome.question === "identify") {
+				const role = model.getComponentMetadata(outcome.partId)?.role ?? "";
+				return {
+					status: "answered",
+					caption: say(role ? "identify" : "ask", {
+						part,
+						role
+					}),
+					speak: true,
+					outcome,
+					records: [],
+					discussedComponentId: outcome.partId
+				};
+			}
+			return {
+				status: "unavailable",
+				caption: say("notTaughtYet", { part }),
+				speak: true,
+				outcome,
+				records: [],
+				discussedComponentId: outcome.partId
+			};
+		}
+		case "unavailable": return {
+			status: "unavailable",
+			caption: say(outcome.reason, { part: partName(lexicon, outcome.partId) }),
+			speak: true,
+			outcome,
+			records: [],
+			discussedComponentId: outcome.partId
+		};
+		case "unknownPart": {
+			const spoken = outcome.spoken ? displaySpoken(outcome.spoken) : "";
+			return {
+				status: "rejected",
+				caption: !spoken ? say("unknownPartGeneric") : outcome.belongsTo ? say("unknownPartOtherModel", {
+					part: spoken,
+					other: outcome.belongsTo
+				}) : say("unknownPart", { part: spoken }),
+				speak: true,
+				outcome,
+				records: []
+			};
+		}
+		case "commands": {
+			const records = [];
+			for (const command of outcome.commands) {
+				const rec = dispatcher.dispatch(command, "voice");
+				records.push(rec);
+				if (rec.status === "rejected") return {
+					status: "rejected",
+					caption: say(rec.code ?? "cannot", { part: partName(lexicon, outcome.partId) }),
+					speak: true,
+					outcome,
+					records
+				};
+			}
+			if (records.some((r) => r.status === "deferred")) return {
+				status: "deferred",
+				caption: say("deferred"),
+				speak: true,
+				outcome,
+				records,
+				discussedComponentId: outcome.partId
+			};
+			return {
+				status: "executed",
+				caption: confirmationCaption(outcome, language, model),
+				speak: Boolean(input.speakConfirmations),
+				outcome,
+				records,
+				discussedComponentId: outcome.partId
+			};
+		}
+	}
+}
+/** Confirmation text for a command outcome (also used when a deferred command later runs). */
+function confirmationCaption(outcome, language, model) {
+	if (outcome.kind !== "commands") return "";
+	const lexicon = lexiconFor(model);
+	const { key, vars } = replyKeyForCommands(outcome.intent, outcome.commands);
+	const highlight = outcome.commands.find((c) => c.type === "component.highlight");
+	const list = highlight?.type === "component.highlight" ? highlight.componentIds.map((id) => partName(lexicon, id)) : void 0;
+	return reply(key, language, {
+		model: model.name,
+		part: partName(lexicon, outcome.partId),
+		list,
+		...vars
+	});
+}
+/** Capitalise an English spoken phrase for display ("piston" -> "Piston"); native script unchanged. */
+function displaySpoken(phrase) {
+	const n = normalise(phrase);
+	return /^[a-z]/.test(n) ? n.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : n;
+}
+// src/services/voice/voiceLanguage.ts
+/**
+* Conversation language handling (voice-first milestone).
+*
+* Gnani Prisma must be told the language before it transcribes. Measured live (27 Oct 2026):
+* Telugu/Hindi speech sent as en-IN comes back as romanised phonetics ("idi asal educ avasar"),
+* and English speech sent as te-IN/hi-IN comes back transliterated ("షో మీ ద బ్యాక్"). So when the
+* user switches language without touching the selector, the first transcript is often not
+* understood. Then the SAME recording is transcribed in the other conversation languages and the
+* version that is understood wins; its language becomes the reply language and the new preference.
+* Extra Prisma calls happen only when the first transcript was not understood.
+*/
+/** Languages with full command, reply and teaching support (others stay beta). */
+var CONVERSATION_LANGUAGES = [
+	"te-IN",
+	"hi-IN",
+	"en-IN"
+];
+/**
+* The language a transcript was spoken in, given the selected UI language: Telugu script means
+* Telugu, Devanagari means Hindi (unless Marathi is selected, which shares the script), and Latin
+* text while Telugu/Hindi is selected means English. Otherwise the UI language.
+*/
+function turnLanguage(text, uiLanguage) {
+	const script = scriptLanguage(text);
+	if (script === "te-IN") return "te-IN";
+	if (script === "hi-IN") return uiLanguage === "mr-IN" ? "mr-IN" : "hi-IN";
+	if (/[a-z]/i.test(text) && (uiLanguage === "te-IN" || uiLanguage === "hi-IN")) return "en-IN";
+	return uiLanguage;
+}
+async function transcribeWithLanguageRetry(wav, uiLanguage, transcribeFn, understood, signal) {
+	const first = await transcribeFn(wav, uiLanguage, signal);
+	if (!first.trim() || understood(first)) return {
+		text: first,
+		language: turnLanguage(first, uiLanguage),
+		retried: false
+	};
+	const others = CONVERSATION_LANGUAGES.filter((l) => l !== uiLanguage);
+	const results = await Promise.all(others.map((language) => transcribeFn(wav, language, signal).then((text) => ({
+		language,
+		text
+	}), () => ({
+		language,
+		text: ""
+	}))));
+	if (signal?.aborted) throw new DOMException("cancelled", "AbortError");
+	const hit = results.find((r) => r.text.trim() && understood(r.text));
+	return hit ? {
+		text: hit.text,
+		language: hit.language,
+		retried: true
+	} : {
+		text: first,
+		language: turnLanguage(first, uiLanguage),
+		retried: true
+	};
+}
+// src/services/voice/interpretClient.ts
+/**
+* Intent interpretation fallback (voice-first milestone).
+*
+* Only for utterances the deterministic parser did not understand. The backend LLM returns ONE
+* intent from a fixed list (+ optional part id from the loaded model + language). The intent is
+* turned into a canonical English phrase that goes through the SAME parser, reference resolver
+* and validated dispatcher as any spoken command — the LLM never produces actions.
+*/
+var INTERPRET_INTENTS = [
+	"zoom_in",
+	"zoom_out",
+	"rotate_left",
+	"rotate_right",
+	"rotate_up",
+	"rotate_down",
+	"pan_left",
+	"pan_right",
+	"pan_up",
+	"pan_down",
+	"view_front",
+	"view_back",
+	"view_top",
+	"view_left",
+	"view_right",
+	"view_isometric",
+	"view_bottom",
+	"reset_view",
+	"focus_part",
+	"select_part",
+	"isolate_part",
+	"hide_part",
+	"show_part",
+	"show_all",
+	"explode",
+	"assemble",
+	"play_animation",
+	"pause_animation",
+	"explain_part",
+	"purpose_part",
+	"how_part",
+	"failure_part",
+	"explain_model",
+	"related_parts",
+	"stop_explanation",
+	"continue_explanation",
+	"unclear",
+	"unsupported"
+];
+/** Canonical phrase per intent; {part} = "the <part name>" or "this part". null = nothing to run. */
+var PHRASES = {
+	zoom_in: "zoom in",
+	zoom_out: "zoom out",
+	rotate_left: "rotate left",
+	rotate_right: "rotate right",
+	rotate_up: "rotate up",
+	rotate_down: "rotate down",
+	pan_left: "move left",
+	pan_right: "move right",
+	pan_up: "move up",
+	pan_down: "move down",
+	view_front: "show the front view",
+	view_back: "show the back view",
+	view_top: "show the top view",
+	view_left: "show the left side view",
+	view_right: "show the right side view",
+	view_isometric: "isometric view",
+	view_bottom: "show the bottom view",
+	reset_view: "reset the view",
+	focus_part: "focus on {part}",
+	select_part: "select {part}",
+	isolate_part: "isolate {part}",
+	hide_part: "hide {part}",
+	show_part: "show {part} again",
+	show_all: "show all",
+	explode: "explode",
+	assemble: "assemble",
+	play_animation: "play the animation",
+	pause_animation: "pause the animation",
+	explain_part: "explain {part}",
+	purpose_part: "why is {part} needed",
+	how_part: "how does {part} work",
+	failure_part: "what happens if {part} fails",
+	explain_model: "explain how this model works",
+	related_parts: "show the parts connected to {part}",
+	stop_explanation: "stop",
+	continue_explanation: "continue",
+	unclear: null,
+	unsupported: null
+};
+/** The phrase to run through the deterministic parser, or null for unclear / unsupported. */
+function canonicalPhrase(i, partName) {
+	const template = PHRASES[i.intent];
+	if (!template) return null;
+	const name = i.componentId ? partName(i.componentId) : null;
+	return template.replace("{part}", name ? `the ${name}` : "this part");
+}
+var InterpretError = class extends Error {
+	code;
+	constructor(code, message) {
+		super(message);
+		this.code = code;
+	}
+};
+async function requestInterpretation(body, signal, fetchImpl = fetch) {
+	let resp;
+	try {
+		resp = await fetchImpl("/api/interpret", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+			signal
+		});
+	} catch {
+		throw new InterpretError(signal?.aborted ? "CANCELLED" : "BACKEND_UNAVAILABLE", "Interpretation unavailable.");
+	}
+	let data = null;
+	try {
+		data = await resp.json();
+	} catch {
+		throw new InterpretError("BACKEND_UNAVAILABLE", "Interpretation unavailable.");
+	}
+	if (!resp.ok || !data || !INTERPRET_INTENTS.includes(data.intent)) throw new InterpretError(data?.error?.code ?? "UNKNOWN", "Interpretation unavailable.");
+	return {
+		intent: data.intent,
+		componentId: typeof data.componentId === "string" ? data.componentId : null,
+		language: typeof data.language === "string" ? data.language : null
+	};
+}
+// src/components/voice/TeachingPanel.tsx
+var CLAIM_LABEL = {
+	visible: "Shown in the 3D model",
+	metadata: "From the model data",
+	engineering: "Engineering explanation",
+	notSimulated: "Not simulated in this app"
+};
+var TeachingPanel = ({ session }) => {
+	const { state, pending, error, notice, question, player } = session;
+	const plan = state.plan;
+	const active = player.isActive();
+	if (!pending && !plan && !error && !notice) return null;
+	const step = plan && state.stepPosition >= 0 ? plan.steps[state.stepPosition] : null;
+	const progress = plan ? `${Math.max(0, state.stepPosition) + 1} / ${plan.steps.length}` : "";
+	return /* @__PURE__ */ jsxs("div", {
+		className: "teach-panel",
+		"aria-label": "Explanation",
+		children: [
+			question && /* @__PURE__ */ jsxs("div", {
+				className: "teach-question",
+				children: [/* @__PURE__ */ jsx("span", { children: "Question" }), question]
+			}),
+			pending && /* @__PURE__ */ jsx("div", {
+				className: "teach-status",
+				"aria-live": "polite",
+				children: "Preparing an explanation…"
+			}),
+			plan && /* @__PURE__ */ jsxs(Fragment, { children: [
+				/* @__PURE__ */ jsxs("div", {
+					className: "teach-head",
+					children: [/* @__PURE__ */ jsx("strong", {
+						className: "teach-title",
+						children: plan.title
+					}), (active || state.status === "finished") && /* @__PURE__ */ jsx("span", {
+						className: "teach-progress",
+						children: state.status === "finished" ? "Done" : `Step ${progress}`
+					})]
+				}),
+				notice && /* @__PURE__ */ jsx("div", {
+					className: "teach-limit",
+					children: notice
+				}),
+				plan.cannotAnswer && /* @__PURE__ */ jsx("div", {
+					className: "teach-limit",
+					children: plan.cannotAnswer
+				}),
+				step && active && /* @__PURE__ */ jsxs("div", {
+					className: "teach-step",
+					"aria-live": "polite",
+					children: [
+						/* @__PURE__ */ jsx("div", {
+							className: "teach-caption",
+							children: state.caption
+						}),
+						/* @__PURE__ */ jsx("div", {
+							className: "teach-narration",
+							children: state.narration
+						}),
+						/* @__PURE__ */ jsx("span", {
+							className: `teach-claim claim-${step.claim}`,
+							children: CLAIM_LABEL[step.claim]
+						})
+					]
+				}),
+				state.status === "finished" && /* @__PURE__ */ jsx("div", {
+					className: "teach-narration",
+					children: plan.explanation
+				}),
+				state.message && /* @__PURE__ */ jsx("div", {
+					className: "teach-message",
+					children: state.message
+				}),
+				(plan.rejectedSteps.length > 0 || state.runtimeRejected.length > 0) && /* @__PURE__ */ jsxs("div", {
+					className: "teach-rejected",
+					children: [plan.rejectedSteps.length + state.runtimeRejected.length, " step(s) skipped because they could not be shown safely on this model."]
+				}),
+				/* @__PURE__ */ jsxs("div", {
+					className: "teach-controls",
+					children: [
+						state.status === "running" && /* @__PURE__ */ jsx("button", {
+							type: "button",
+							onClick: () => player.pause(),
+							children: "Pause"
+						}),
+						state.status === "paused" && /* @__PURE__ */ jsx("button", {
+							type: "button",
+							onClick: () => player.resume(),
+							children: "Resume"
+						}),
+						state.status === "waitingForUser" && /* @__PURE__ */ jsx("button", {
+							type: "button",
+							onClick: () => player.continue(),
+							children: "Continue"
+						}),
+						active && /* @__PURE__ */ jsx("button", {
+							type: "button",
+							onClick: () => player.cancel(),
+							children: "Stop explanation"
+						})
+					]
+				}),
+				state.status === "finished" && plan.followUpSuggestions.length > 0 && /* @__PURE__ */ jsxs("div", {
+					className: "teach-followups",
+					children: [/* @__PURE__ */ jsx("span", { children: "You could ask" }), plan.followUpSuggestions.map((f) => /* @__PURE__ */ jsxs("div", { children: [
+						"“",
+						f,
+						"”"
+					] }, f))]
+				})
+			] }),
+			error && /* @__PURE__ */ jsx("div", {
+				className: "teach-error",
+				role: "alert",
+				children: error
+			})
+		]
+	});
+};
+// src/services/teaching/teachingClient.ts
+var TeachingServiceError = class extends Error {
+	code;
+	constructor(code, message) {
+		super(message);
+		this.code = code;
+	}
+};
+var TEACH_TIMEOUT_MS = 45e3;
+var TEACH_ERROR_MESSAGES = {
+	LLM_NOT_CONFIGURED: "Explanations are not set up: the server has no teaching model configured (LLM_BASE_URL, LLM_MODEL, LLM_API_KEY).",
+	LLM_AUTH: "The teaching model rejected the server key.",
+	LLM_MODEL_NOT_FOUND: "The configured teaching model is not available to this key.",
+	LLM_RATE_LIMIT: "Too many explanation requests. Please wait a moment.",
+	LLM_QUOTA_EXCEEDED: "The teaching model's usage quota is used up for now. Try again later.",
+	LLM_TIMEOUT: "The explanation took too long. Please try again.",
+	LLM_UNREACHABLE: "The server could not reach the teaching model.",
+	LLM_UNAVAILABLE: "The teaching model is temporarily unavailable.",
+	LLM_MALFORMED: "The teaching model gave an unusable answer. Please ask again.",
+	PLAN_INVALID: "The explanation could not be used safely with this model.",
+	PLAN_UNSAFE: "The explanation was rejected because it contained unsafe content.",
+	PLAN_TOO_LONG: "The explanation was too long to play.",
+	BACKEND_UNAVAILABLE: "The voice/teaching server is not running.",
+	TIMEOUT: "The explanation took too long. Please try again."
+};
+async function requestTeachingPlan(body, signal, fetchImpl = fetch) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), TEACH_TIMEOUT_MS);
+	const onAbort = () => controller.abort();
+	signal?.addEventListener("abort", onAbort);
+	let resp;
+	try {
+		resp = await fetchImpl("/api/teach", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+			signal: controller.signal
+		});
+	} catch {
+		if (signal?.aborted) throw new TeachingServiceError("CANCELLED", "Cancelled.");
+		if (controller.signal.aborted) throw new TeachingServiceError("TIMEOUT", TEACH_ERROR_MESSAGES.TIMEOUT);
+		throw new TeachingServiceError("BACKEND_UNAVAILABLE", TEACH_ERROR_MESSAGES.BACKEND_UNAVAILABLE);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+	let data = null;
+	try {
+		data = await resp.json();
+	} catch {
+		throw new TeachingServiceError("BACKEND_UNAVAILABLE", TEACH_ERROR_MESSAGES.BACKEND_UNAVAILABLE);
+	}
+	if (!resp.ok || !data?.plan) {
+		const code = data?.error?.code ?? "UNKNOWN";
+		throw new TeachingServiceError(code, TEACH_ERROR_MESSAGES[code] ?? data?.error?.message ?? "The explanation failed.");
+	}
+	return data.plan;
+}
+var PLAN_LIMITS = {
+	steps: 8,
+	actionsPerStep: 3,
+	narration: 350,
+	caption: 120,
+	title: 120,
+	explanation: 1200,
+	followUps: 3,
+	followUp: 120,
+	holdMs: 4e3,
+	highlight: 20
+};
+/** The subset of V1 commands a plan may use: show and animate only (no hiding, switching, navigating). */
+var TEACHABLE_ACTIONS = [
+	"component.select",
+	"component.focus",
+	"component.highlight",
+	"component.clearHighlight",
+	"component.isolate",
+	"assembly.explode",
+	"assembly.restore",
+	"animation.play",
+	"animation.pause",
+	"animation.setSpeed",
+	"camera.view",
+	"camera.reset"
+];
+var UNSAFE_TEXT = new RegExp([
+	"https?://",
+	"www\\.",
+	"<\\s*/?\\s*(script|iframe|img|a)\\b",
+	"```",
+	"javascript:",
+	"\\beval\\s*\\(",
+	"\\bexec\\s*\\(",
+	"\\brequire\\s*\\(",
+	"\\bimport\\s+[\\w{]",
+	"=>",
+	"\\bfunction\\s*\\(",
+	"\\bnew\\s+THREE\\b",
+	"\\bTHREE\\.",
+	"\\brm\\s+-rf\\b",
+	"\\bsudo\\b",
+	"\\$\\("
+].join("|"), "i");
+var PlanError = class extends Error {
+	code;
+	constructor(code, reason) {
+		super(reason);
+		this.code = code;
+	}
+};
+function text(value, max, field, allowEmpty = false) {
+	if (typeof value !== "string") throw new PlanError("PLAN_INVALID", `${field} must be text.`);
+	const t = value.trim();
+	if (!t && !allowEmpty) throw new PlanError("PLAN_INVALID", `${field} is empty.`);
+	if (t.length > max) throw new PlanError("PLAN_INVALID", `${field} is longer than ${max} characters.`);
+	if (UNSAFE_TEXT.test(t)) throw new PlanError("PLAN_UNSAFE", `${field} contains code, markup or a link.`);
+	return t;
+}
+/**
+* Checks one action against the snapshot's model and capabilities, then V1's own validator.
+* Returns the clean command or throws; never substitutes a different action.
+*/
+function action(raw, snapshot, ctx) {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new PlanError("ACTION_INVALID", "Action must be an object.");
+	const type = raw.type;
+	if (!TEACHABLE_ACTIONS.includes(type)) throw new PlanError("ACTION_UNSUPPORTED", `Action "${String(type)}" is not allowed in teaching plans.`);
+	if (!snapshot.availableActions.includes(type)) throw new PlanError("ACTION_UNAVAILABLE", `Action "${String(type)}" is not available for this model right now.`);
+	const result = validateSceneCommand(raw, ctx);
+	if (!result.ok) throw new PlanError(result.code, result.reason);
+	return result.command;
+}
+/** Validates a plan that just arrived from the backend against the current scene. */
+function validateTeachingPlan(raw, snapshot, ctx) {
+	try {
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new PlanError("PLAN_INVALID", "Plan must be an object.");
+		const p = raw;
+		if (p.schemaVersion !== 1) throw new PlanError("PLAN_INVALID", "Unknown plan schema version.");
+		if (typeof p.planId !== "string" || !/^[a-f0-9]{8,64}$/.test(p.planId)) throw new PlanError("PLAN_INVALID", "Plan id is missing.");
+		if (!snapshot.model || p.modelId !== snapshot.model.id) throw new PlanError("STALE_MODEL", "This explanation was prepared for a different model.");
+		const ids = new Set(snapshot.components.map((c) => c.id));
+		const target = p.targetComponentId ?? null;
+		if (target !== null && (typeof target !== "string" || !ids.has(target))) throw new PlanError("UNKNOWN_COMPONENT", `Plan target "${String(target)}" is not in this model.`);
+		if (!Array.isArray(p.steps) || p.steps.length === 0) throw new PlanError("PLAN_INVALID", "Plan has no steps.");
+		if (p.steps.length > PLAN_LIMITS.steps) throw new PlanError("PLAN_TOO_LONG", `Plan has more than ${PLAN_LIMITS.steps} steps.`);
+		const followRaw = p.followUpSuggestions ?? [];
+		if (!Array.isArray(followRaw)) throw new PlanError("PLAN_INVALID", "followUpSuggestions must be a list.");
+		const plan = {
+			schemaVersion: 1,
+			planId: p.planId,
+			modelId: snapshot.model.id,
+			targetComponentId: target,
+			title: text(p.title, PLAN_LIMITS.title, "title"),
+			explanation: text(p.explanation, PLAN_LIMITS.explanation, "explanation"),
+			cannotAnswer: p.cannotAnswer == null ? null : text(p.cannotAnswer, 300, "cannotAnswer", true) || null,
+			steps: [],
+			rejectedSteps: Array.isArray(p.rejectedSteps) ? p.rejectedSteps.filter((r) => r && typeof r.index === "number").map((r) => ({
+				index: r.index,
+				code: String(r.code ?? "REJECTED").slice(0, 40),
+				reason: String(r.reason ?? "").slice(0, 200)
+			})) : [],
+			followUpSuggestions: followRaw.slice(0, PLAN_LIMITS.followUps).map((f) => text(f, PLAN_LIMITS.followUp, "followUp")),
+			...typeof p.language === "string" && /^[a-z]{2}-IN$/.test(p.language) ? { language: p.language } : {},
+			...p.source === "llm" || p.source === "modelData" ? { source: p.source } : {}
+		};
+		p.steps.forEach((rawStep, position) => {
+			const s = typeof rawStep === "object" && rawStep !== null ? rawStep : {};
+			const index = typeof s.index === "number" ? s.index : position;
+			try {
+				if (typeof rawStep !== "object" || rawStep === null) throw new PlanError("PLAN_INVALID", "Step must be an object.");
+				if (s.kind !== "demonstrate" && s.kind !== "explain") throw new PlanError("PLAN_INVALID", "Unknown step kind.");
+				if (![
+					"visible",
+					"metadata",
+					"engineering",
+					"notSimulated"
+				].includes(s.claim)) throw new PlanError("PLAN_INVALID", "Unknown claim type.");
+				const acts = s.actions ?? [];
+				if (!Array.isArray(acts) || acts.length > PLAN_LIMITS.actionsPerStep) throw new PlanError("PLAN_INVALID", `A step may have at most ${PLAN_LIMITS.actionsPerStep} actions.`);
+				const stepTarget = s.targetComponentId ?? null;
+				if (stepTarget !== null && (typeof stepTarget !== "string" || !ids.has(stepTarget))) throw new PlanError("UNKNOWN_COMPONENT", `Step target "${String(stepTarget)}" is not in this model.`);
+				const hold = s.holdMs ?? 0;
+				if (typeof hold !== "number" || !Number.isInteger(hold) || hold < 0 || hold > PLAN_LIMITS.holdMs) throw new PlanError("PLAN_INVALID", `holdMs must be 0-${PLAN_LIMITS.holdMs}.`);
+				plan.steps.push({
+					index,
+					kind: s.kind,
+					claim: s.claim,
+					narration: text(s.narration, PLAN_LIMITS.narration, "narration"),
+					caption: text(s.caption, PLAN_LIMITS.caption, "caption"),
+					targetComponentId: stepTarget,
+					actions: acts.map((a) => action(a, snapshot, ctx)),
+					waitFor: s.waitFor === "user" ? "user" : "narration",
+					holdMs: hold
+				});
+			} catch (err) {
+				if (!(err instanceof PlanError)) throw err;
+				plan.rejectedSteps.push({
+					index,
+					code: err.code,
+					reason: err.message
+				});
+			}
+		});
+		if (plan.steps.length === 0) throw new PlanError("PLAN_INVALID", "No step of the plan can run on this model.");
+		return {
+			ok: true,
+			plan
+		};
+	} catch (err) {
+		if (err instanceof PlanError) return {
+			ok: false,
+			code: err.code,
+			reason: err.message
+		};
+		throw err;
+	}
+}
+/**
+* Re-validates one step against the live scene immediately before it runs (the user may have
+* switched models or changed the scene since the plan was created).
+*/
+function validateStepNow(step, planModelId, ctx) {
+	if (ctx.modelId !== planModelId) return {
+		ok: false,
+		code: "STALE_MODEL",
+		reason: "The loaded model changed."
+	};
+	const commands = [];
+	for (const command of step.actions) {
+		if (!TEACHABLE_ACTIONS.includes(command.type)) return {
+			ok: false,
+			code: "ACTION_UNSUPPORTED",
+			reason: `Action "${command.type}" is not allowed.`
+		};
+		const result = validateSceneCommand(command, ctx);
+		if (!result.ok) return {
+			ok: false,
+			code: result.code,
+			reason: result.reason
+		};
+		commands.push(result.command);
+	}
+	return {
+		ok: true,
+		commands
+	};
+}
+// src/services/teaching/planPlayer.ts
+var CATEGORY_OF = {
+	"component.highlight": "highlight",
+	"component.clearHighlight": "highlight",
+	"component.isolate": "isolate",
+	"assembly.explode": "explode",
+	"assembly.restore": "explode",
+	"animation.play": "animation",
+	"animation.pause": "animation",
+	"animation.setSpeed": "animation",
+	"component.select": "select"
+};
+var IDLE = {
+	status: "idle",
+	plan: null,
+	stepPosition: -1,
+	stepCount: 0,
+	phase: null,
+	caption: "",
+	narration: "",
+	message: null,
+	runtimeRejected: []
+};
+var TeachingPlanPlayer = class {
+	state = { ...IDLE };
+	listeners = /* @__PURE__ */ new Set();
+	deps;
+	runToken = 0;
+	clip = null;
+	nextClip = null;
+	continueRequested = false;
+	awaitingContinue = false;
+	baseline = null;
+	touched = /* @__PURE__ */ new Set();
+	ownDispatch = false;
+	constructor(deps) {
+		this.deps = {
+			pollMs: 40,
+			settleTimeoutMs: 5e3,
+			...deps
+		};
+	}
+	/** Starts watching the dispatcher for manual takeover. Returns the detach function. */
+	attach() {
+		return this.deps.dispatcher.subscribe((rec) => {
+			if (this.ownDispatch || rec.source === "ai") return;
+			if (rec.status !== "executed" && rec.status !== "deferred") return;
+			if (this.state.status === "running" || this.state.status === "waitingForUser") this.pause("Paused because you changed the scene. Resume to continue the explanation.");
+		});
+	}
+	getState() {
+		return this.state;
+	}
+	subscribe(listener) {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+	isActive() {
+		return [
+			"running",
+			"paused",
+			"waitingForUser"
+		].includes(this.state.status);
+	}
+	/** Starts a validated plan. Returns false (and does nothing) if another plan is active or the model changed. */
+	start(plan) {
+		if (this.isActive()) return false;
+		const snap = this.deps.getSnapshot();
+		if (!snap.model || snap.model.id !== plan.modelId) {
+			this.set({
+				...IDLE,
+				status: "failed",
+				plan,
+				stepCount: plan.steps.length,
+				message: "This explanation was prepared for a different model."
+			});
+			return false;
+		}
+		this.baseline = {
+			modelId: plan.modelId,
+			selected: snap.selectedComponentId,
+			isolated: snap.isolatedComponentId.status === "known" ? snap.isolatedComponentId.value : null,
+			highlighted: snap.highlightedComponentIds.status === "known" ? [...snap.highlightedComponentIds.value] : [],
+			exploded: snap.exploded.factor,
+			animation: snap.animation.state.status === "known" ? { ...snap.animation.state.value } : null
+		};
+		this.touched = /* @__PURE__ */ new Set();
+		this.continueRequested = false;
+		const token = ++this.runToken;
+		this.set({
+			...IDLE,
+			status: "running",
+			plan,
+			stepCount: plan.steps.length
+		});
+		this.run(plan, token);
+		return true;
+	}
+	pause(message = "Paused.") {
+		if (this.state.status !== "running" && this.state.status !== "waitingForUser") return;
+		this.clip?.pause();
+		this.set({
+			status: "paused",
+			message
+		});
+	}
+	resume() {
+		if (this.state.status !== "paused") return;
+		this.clip?.resume();
+		this.set({
+			status: this.awaitingContinue ? "waitingForUser" : "running",
+			message: null
+		});
+	}
+	/** Continue past a step that waits for the learner. */
+	continue() {
+		if (this.state.status === "waitingForUser") {
+			this.continueRequested = true;
+			this.awaitingContinue = false;
+			this.set({ status: "running" });
+		}
+	}
+	/** Stops the plan, stops speech, and restores what the plan changed (unless the model changed). */
+	cancel(message = "Explanation stopped.") {
+		if (!this.isActive()) return;
+		this.stopRun();
+		this.restore("cancel");
+		this.set({
+			status: "cancelled",
+			phase: null,
+			message
+		});
+	}
+	set(patch) {
+		this.state = {
+			...this.state,
+			...patch
+		};
+		for (const l of this.listeners) try {
+			l(this.state);
+		} catch {}
+	}
+	stopRun() {
+		this.runToken++;
+		this.awaitingContinue = false;
+		this.clip?.stop();
+		this.clip = null;
+		this.nextClip?.clip.stop();
+		this.nextClip = null;
+	}
+	alive(token) {
+		return token === this.runToken;
+	}
+	sleep(ms) {
+		return new Promise((r) => setTimeout(r, ms));
+	}
+	/** Per-poll checks shared by every wait: model switch cancels, user steering pauses. */
+	watch(plan) {
+		const snap = this.deps.getSnapshot();
+		if (!snap.model || snap.model.id !== plan.modelId) {
+			this.stopRun();
+			this.baseline = null;
+			this.set({
+				status: "cancelled",
+				phase: null,
+				message: "The model changed, so the explanation was stopped."
+			});
+			return;
+		}
+		if (this.state.status === "running" && snap.camera.status === "known" && snap.camera.value.userSteering) this.pause("Paused because you moved the view. Resume to continue the explanation.");
+	}
+	/** Waits until `done()` (checked every poll) while honouring pause; `budgetMs` counts only unpaused time. */
+	async waitUntil(token, plan, done, budgetMs = Infinity) {
+		let elapsed = 0;
+		while (this.alive(token)) {
+			this.watch(plan);
+			if (!this.alive(token)) return false;
+			const paused = this.state.status === "paused";
+			if (!paused && done()) return true;
+			if (!paused && elapsed >= budgetMs) return true;
+			await this.sleep(this.deps.pollMs);
+			if (!paused) elapsed += this.deps.pollMs;
+		}
+		return false;
+	}
+	dispatch(command) {
+		const cat = CATEGORY_OF[command.type];
+		if (cat) this.touched.add(cat);
+		this.ownDispatch = true;
+		try {
+			return this.deps.dispatcher.dispatch(command, "ai");
+		} finally {
+			this.ownDispatch = false;
+		}
+	}
+	clipFor(plan, position) {
+		if (this.nextClip?.position === position) {
+			const c = this.nextClip.clip;
+			this.nextClip = null;
+			return c;
+		}
+		return this.deps.narrator.prepare(plan.steps[position].narration, plan.language);
+	}
+	async run(plan, token) {
+		if (plan.targetComponentId && this.deps.getSnapshot().selectedComponentId !== plan.targetComponentId) this.dispatch({
+			type: "component.select",
+			componentId: plan.targetComponentId
+		});
+		for (let pos = 0; pos < plan.steps.length; pos++) {
+			if (!await this.waitUntil(token, plan, () => true)) return;
+			const step = plan.steps[pos];
+			this.set({
+				stepPosition: pos,
+				phase: "actions",
+				caption: step.caption,
+				narration: step.narration
+			});
+			const check = validateStepNow(step, plan.modelId, this.deps.dispatcher.getContext());
+			if (!check.ok) {
+				if (check.code === "STALE_MODEL") {
+					this.stopRun();
+					this.set({
+						status: "cancelled",
+						phase: null,
+						message: "The model changed, so the explanation was stopped."
+					});
+					return;
+				}
+				this.set({ runtimeRejected: [...this.state.runtimeRejected, {
+					index: step.index,
+					code: check.code,
+					reason: check.reason
+				}] });
+				continue;
+			}
+			for (const command of check.commands) {
+				if (!this.alive(token)) return;
+				const rec = this.dispatch(command);
+				if (rec.status === "rejected") {
+					this.set({ runtimeRejected: [...this.state.runtimeRejected, {
+						index: step.index,
+						code: rec.code ?? "REJECTED",
+						reason: rec.detail ?? ""
+					}] });
+					break;
+				}
+			}
+			const settled = () => {
+				const cam = this.deps.getSnapshot().camera;
+				return cam.status !== "known" || cam.value.settled;
+			};
+			if (!await this.waitUntil(token, plan, settled, this.deps.settleTimeoutMs)) return;
+			this.clip = this.clipFor(plan, pos);
+			if (pos + 1 < plan.steps.length) this.nextClip = {
+				position: pos + 1,
+				clip: this.deps.narrator.prepare(plan.steps[pos + 1].narration, plan.language)
+			};
+			let narrationOver = false;
+			this.clip.done.then(() => narrationOver = true);
+			this.set({ phase: "narrating" });
+			this.clip.play();
+			if (this.state.status === "paused") this.clip.pause();
+			if (!await this.waitUntil(token, plan, () => narrationOver)) return;
+			this.clip = null;
+			if (step.holdMs > 0) {
+				this.set({ phase: "holding" });
+				if (!await this.waitUntil(token, plan, () => false, step.holdMs)) return;
+			}
+			if (step.waitFor === "user" && pos + 1 < plan.steps.length) {
+				this.continueRequested = false;
+				this.awaitingContinue = true;
+				if (this.state.status === "running") this.set({ status: "waitingForUser" });
+				if (!await this.waitUntil(token, plan, () => this.continueRequested)) return;
+				this.awaitingContinue = false;
+			}
+		}
+		if (!this.alive(token)) return;
+		this.restore("finish");
+		this.runToken++;
+		this.set({
+			status: "finished",
+			phase: null,
+			message: null
+		});
+	}
+	/** Puts back every category the plan touched (see policy at the top). */
+	restore(reason) {
+		const base = this.baseline;
+		this.baseline = null;
+		if (!base) return;
+		const snap = this.deps.getSnapshot();
+		if (!snap.model || snap.model.id !== base.modelId) return;
+		const t = this.touched;
+		if (t.has("highlight")) this.dispatch(base.highlighted.length ? {
+			type: "component.highlight",
+			componentIds: base.highlighted
+		} : { type: "component.clearHighlight" });
+		if (t.has("isolate")) this.dispatch({
+			type: "component.isolate",
+			componentId: base.isolated
+		});
+		if (t.has("explode")) this.dispatch(base.exploded > 0 ? {
+			type: "assembly.explode",
+			factor: base.exploded
+		} : { type: "assembly.restore" });
+		if (t.has("animation") && base.animation) {
+			this.dispatch({
+				type: "animation.setSpeed",
+				speed: base.animation.speed
+			});
+			this.dispatch({ type: base.animation.playing ? "animation.play" : "animation.pause" });
+		}
+		if (reason === "cancel" && t.has("select")) this.dispatch({
+			type: "component.select",
+			componentId: base.selected
+		});
+		this.touched.clear();
+	}
+};
+// src/services/teaching/componentBrief.ts
+var VERB = {
+	drives: "drives",
+	driven_by: "is driven by",
+	mates_with: "meshes with",
+	supports: "supports",
+	supported_by: "is supported by",
+	connected_to: "is connected to",
+	fastened_to: "is fastened to",
+	transfers_force_to: "passes load to",
+	receives_force_from: "receives load from"
+};
+/** Joins names as "A", "A and B", "A, B and C". */
+function list(names) {
+	return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+/** Shortens to whole sentences within the narration limit. */
+function fit(text, max = PLAN_LIMITS.narration) {
+	const t = text.replace(/\s+/g, " ").trim();
+	if (t.length <= max) return t;
+	const sentences = t.match(/[^.!?]+[.!?]+/g) ?? [t];
+	let out = "";
+	for (const s of sentences) {
+		if ((out + s).trim().length > max) break;
+		out += s;
+	}
+	return out.trim() || t.slice(0, max - 1).replace(/\s+\S*$/, "") + "…";
+}
+var hexId = () => Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+var step$1 = (index, o) => ({
+	index,
+	kind: o.kind ?? "explain",
+	claim: o.claim,
+	caption: fit(o.caption, PLAN_LIMITS.caption),
+	narration: fit(o.narration),
+	targetComponentId: o.target ?? null,
+	actions: o.actions ?? [],
+	waitFor: "narration",
+	holdMs: 0
+});
+/**
+* Builds a grounded plan for one component (or the whole model when componentId is null).
+* questionType tailors the emphasis ('failure' adds what is linked and what is not simulated).
+*/
+function buildComponentBrief(model, snapshot, componentId, questionType = "explain") {
+	const can = (a) => snapshot.availableActions.includes(a);
+	const nameOf = (id) => model.getComponentMetadata(id)?.name ?? id;
+	const animated = (model.animations ?? []).length > 0;
+	const steps = [];
+	if (componentId) {
+		const meta = model.getComponentMetadata(componentId);
+		const name = meta?.name ?? componentId;
+		steps.push(step$1(0, {
+			kind: "demonstrate",
+			claim: "metadata",
+			target: componentId,
+			caption: name,
+			narration: `This is the ${name}. Its role: ${meta?.role ?? "not recorded"}. ${meta?.description ?? ""}`,
+			actions: can("component.focus") ? [{
+				type: "component.focus",
+				componentId
+			}] : []
+		}));
+		const rels = getComponentRelationships(model, componentId);
+		if (rels.length > 0) {
+			const byVerb = /* @__PURE__ */ new Map();
+			for (const r of rels) {
+				const verb = VERB[r.relationshipType] ?? r.relationshipType.replace(/_/g, " ");
+				const names = byVerb.get(verb) ?? [];
+				if (!names.includes(nameOf(r.targetComponentId))) names.push(nameOf(r.targetComponentId));
+				byVerb.set(verb, names);
+			}
+			const clauses = [...byVerb.entries()].map(([verb, names]) => `${verb} ${list(names)}`);
+			const related = [...new Set(rels.map((r) => r.targetComponentId))];
+			steps.push(step$1(1, {
+				kind: "demonstrate",
+				claim: "metadata",
+				target: componentId,
+				caption: `How the ${name} connects`,
+				narration: `In this model, the ${name} ${list(clauses)}.`,
+				actions: can("component.highlight") ? [{
+					type: "component.highlight",
+					componentIds: related.slice(0, PLAN_LIMITS.highlight)
+				}] : []
+			}));
+		} else steps.push(step$1(1, {
+			claim: "metadata",
+			target: componentId,
+			caption: "Connections",
+			narration: `No connections to other parts are recorded for the ${name} in this model.`
+		}));
+		const notes = meta?.engineeringNotes ?? [];
+		if (notes.length > 0) steps.push(step$1(2, {
+			claim: "metadata",
+			target: componentId,
+			caption: "From the engineering notes",
+			narration: notes.slice(0, 2).join(" ")
+		}));
+		const linked = list([...new Set(rels.map((r) => nameOf(r.targetComponentId)))]);
+		steps.push(step$1(3, {
+			claim: "notSimulated",
+			target: componentId,
+			caption: "What this app does not simulate",
+			narration: questionType === "failure" && linked ? `A failure cannot be simulated here. Based on the recorded connections, a problem with the ${name} would affect ${linked}.` : animated ? "The animation shows the motion only. It does not calculate forces, torque, friction or wear." : "This model shows the structure only. It does not calculate forces or stresses."
+		}));
+		return {
+			schemaVersion: 1,
+			planId: hexId(),
+			modelId: model.id,
+			targetComponentId: componentId,
+			title: `${name} (from the model data)`,
+			explanation: fit(`${name}: ${meta?.role ?? ""}. ${meta?.description ?? ""}`, PLAN_LIMITS.explanation),
+			cannotAnswer: null,
+			steps,
+			rejectedSteps: [],
+			followUpSuggestions: [`Why is the ${name} needed?`, `Show me the parts connected to the ${name}.`],
+			language: "en-IN",
+			source: "modelData"
+		};
+	}
+	steps.push(step$1(0, {
+		claim: "metadata",
+		caption: model.name,
+		narration: `${model.name}. ${model.description}`
+	}));
+	const seen = /* @__PURE__ */ new Set();
+	const facts = [];
+	for (const id of model.getAllComponentIds()) for (const r of getComponentRelationships(model, id)) {
+		if (!r.description || seen.has(r.description) || ![
+			"drives",
+			"supports",
+			"transfers_force_to",
+			"connected_to"
+		].includes(r.relationshipType)) continue;
+		seen.add(r.description);
+		facts.push(r.description);
+	}
+	if (facts.length > 0) steps.push(step$1(1, {
+		claim: "metadata",
+		caption: "How the parts work together",
+		narration: facts.slice(0, 4).join(" ")
+	}));
+	steps.push(step$1(2, {
+		claim: "notSimulated",
+		caption: "What this app does not simulate",
+		narration: animated ? "The animation shows the motion only. It does not calculate forces, torque, friction or wear." : "This model shows the structure only. It does not calculate forces or stresses."
+	}));
+	return {
+		schemaVersion: 1,
+		planId: hexId(),
+		modelId: model.id,
+		targetComponentId: null,
+		title: `${model.name} (from the model data)`,
+		explanation: fit(model.description, PLAN_LIMITS.explanation),
+		cannotAnswer: null,
+		steps,
+		rejectedSteps: [],
+		followUpSuggestions: ["Select a part and ask me to explain it."],
+		language: "en-IN",
+		source: "modelData"
+	};
+}
+// src/services/teaching/factPack.ts
+var clip = (s, n) => (s ?? "").slice(0, n);
+/** What the app can and cannot show, stated explicitly so the LLM never overclaims. */
+function modelLimits(model) {
+	const limits = ["Only the relationships listed here are recorded for this model; any other link is unknown.", "Failures cannot be simulated in this app; failure answers are engineering reasoning only."];
+	if ((model.animations ?? []).length > 0) limits.push("The animation is a kinematic visual demonstration of rotation at fixed speed ratios; it does not simulate forces, torque, friction, wear or load.");
+	else limits.push("This model has no animation.");
+	if (model.domain === "civil") limits.push("No structural analysis, stress calculation or finite-element simulation is implemented; force types in the data are qualitative annotations.");
+	return limits;
+}
+function buildFactPack(model, snapshot, targetComponentId) {
+	const ids = model.getAllComponentIds();
+	const detailed = new Set(targetComponentId ? [targetComponentId, ...getComponentRelationships(model, targetComponentId).map((r) => r.targetComponentId)] : ids);
+	const components = ids.map((id) => {
+		const meta = model.getComponentMetadata(id);
+		const relationships = getComponentRelationships(model, id).slice(0, 20).map((r) => ({
+			type: r.relationshipType,
+			target: r.targetComponentId,
+			description: clip(r.description, 300)
+		}));
+		const full = detailed.has(id);
+		const notes = [];
+		if (full && meta) {
+			notes.push(...meta.engineeringNotes.slice(0, 3));
+			const civil = meta;
+			if (civil.nominalForceType) notes.push(`Force type (qualitative annotation): ${civil.nominalForceType}`);
+			notes.push(...(civil.educationalNotes ?? []).slice(0, 2));
+			notes.push(...meta.specifications.slice(0, 3).map((s) => `${s.label}: ${s.value}`));
+		}
+		return {
+			id,
+			name: clip(meta?.name ?? id, 120),
+			role: clip(meta?.role, 200),
+			description: full ? clip(meta?.description, 600) : "",
+			notes: notes.slice(0, 8).map((n) => clip(n, 300)),
+			relationships
+		};
+	});
+	const pointer = snapshot.pointer.status === "known" ? snapshot.pointer.value.componentId : null;
+	return {
+		modelId: model.id,
+		modelName: model.name,
+		domain: model.domain,
+		modelDescription: clip(model.description, 800),
+		components,
+		animations: (model.animations ?? []).map((a) => ({
+			id: a.id,
+			label: a.label,
+			description: clip(a.description, 400)
+		})),
+		allowedActions: snapshot.availableActions.filter((a) => TEACHABLE_ACTIONS.includes(a)),
+		supportsExplodedView: snapshot.exploded.supported,
+		limits: modelLimits(model),
+		scene: {
+			selectedComponentId: snapshot.selectedComponentId,
+			pointedComponentId: pointer,
+			isolatedComponentId: snapshot.isolatedComponentId.status === "known" ? snapshot.isolatedComponentId.value : null,
+			highlightedComponentIds: snapshot.highlightedComponentIds.status === "known" ? [...snapshot.highlightedComponentIds.value] : [],
+			explodedFactor: snapshot.exploded.factor,
+			animationPlaying: snapshot.animation.state.status === "known" ? snapshot.animation.state.value.playing : null,
+			cameraView: snapshot.camera.status === "known" ? snapshot.camera.value.view : null
+		}
+	};
+}
+// src/services/teaching/teachingController.ts
+var teachingController_exports = /* @__PURE__ */ __exportAll({
+	ENGLISH_FALLBACK_NOTE: () => ENGLISH_FALLBACK_NOTE,
+	FALLBACK_NOTICE: () => FALLBACK_NOTICE,
+	TEACHING_LANGUAGES: () => TEACHING_LANGUAGES,
+	TeachingController: () => TeachingController,
+	teachLanguage: () => teachLanguage
+});
+/** Teaching narration languages (fully verified set); others get English plans and speech. */
+var TEACHING_LANGUAGES = [
+	"en-IN",
+	"te-IN",
+	"hi-IN"
+];
+var teachLanguage = (lang) => TEACHING_LANGUAGES.includes(lang) ? lang : "en-IN";
+var FALLBACK_NOTICE = "The AI teacher is not available right now, so this explanation comes from the model data.";
+var ENGLISH_FALLBACK_NOTE = "It is in English, because the model data is in English.";
+var TeachingController = class {
+	deps;
+	token = 0;
+	abort = null;
+	history = {
+		modelId: "",
+		turns: []
+	};
+	state = {
+		pending: false,
+		question: null,
+		error: null,
+		notice: null
+	};
+	listeners = /* @__PURE__ */ new Set();
+	constructor(deps) {
+		this.deps = deps;
+	}
+	getState() {
+		return this.state;
+	}
+	subscribe(l) {
+		this.listeners.add(l);
+		return () => this.listeners.delete(l);
+	}
+	/** True while a plan is requested or playing (explanation controls apply). */
+	isActive() {
+		return this.state.pending || this.deps.player.isActive();
+	}
+	getHistory() {
+		return this.history.turns;
+	}
+	set(patch) {
+		this.state = {
+			...this.state,
+			...patch
+		};
+		for (const l of this.listeners) try {
+			l(this.state);
+		} catch {}
+	}
+	/** Invalidates the current request: later replies for it are ignored. */
+	invalidate() {
+		this.token += 1;
+		this.abort?.abort();
+		this.abort = null;
+		return this.token;
+	}
+	async ask(info) {
+		const model = this.deps.getModel();
+		if (!model) return "failed";
+		const token = this.invalidate();
+		const controller = new AbortController();
+		this.abort = controller;
+		if (this.deps.player.isActive()) this.deps.player.cancel("Replaced by your new question.");
+		if (this.history.modelId !== model.id) this.history = {
+			modelId: model.id,
+			turns: []
+		};
+		const language = teachLanguage(info.language ?? this.deps.getLanguage());
+		this.set({
+			pending: true,
+			question: info.question,
+			error: null,
+			notice: null
+		});
+		let raw;
+		try {
+			const snapshot = getSceneSnapshot(this.deps.dispatcher, model);
+			raw = await this.deps.requestPlan({
+				question: info.question,
+				language,
+				targetComponentId: info.targetComponentId,
+				questionType: info.questionType,
+				facts: buildFactPack(model, snapshot, info.targetComponentId),
+				history: [...this.history.turns]
+			}, controller.signal);
+		} catch (err) {
+			if (!this.current(token, model) || err.code === "CANCELLED") return "stale";
+			const code = err.code ?? "UNKNOWN";
+			return this.fallback(token, model, info, TEACH_ERROR_MESSAGES[code] ?? err.message);
+		}
+		if (!this.current(token, model)) return "stale";
+		const v = validateTeachingPlan(typeof raw === "object" && raw !== null ? {
+			...raw,
+			language,
+			source: "llm"
+		} : raw, getSceneSnapshot(this.deps.dispatcher, model), this.deps.dispatcher.getContext());
+		if (!v.ok) return this.fallback(token, model, info, `The AI explanation could not be used safely (${v.reason})`);
+		return this.play(v.plan, info) ? "started" : "failed";
+	}
+	/** A new non-teaching request replaces the explanation (and any pending request). */
+	supersede(reason = "Replaced by your new request.") {
+		this.invalidate();
+		if (this.deps.player.isActive()) this.deps.player.cancel(reason);
+		if (this.state.pending) this.set({ pending: false });
+	}
+	cancel(reason = "Explanation stopped.") {
+		this.supersede(reason);
+	}
+	modelChanged(modelId) {
+		this.invalidate();
+		this.history = {
+			modelId: modelId ?? "",
+			turns: []
+		};
+		this.set({
+			pending: false,
+			error: null,
+			notice: null
+		});
+	}
+	/** Plays an already-produced plan through the same validation (dev hook / tests). */
+	playRaw(raw, question = "(simulated plan)") {
+		const model = this.deps.getModel();
+		if (!model) return false;
+		this.invalidate();
+		const v = validateTeachingPlan(raw, getSceneSnapshot(this.deps.dispatcher, model), this.deps.dispatcher.getContext());
+		if (!v.ok) {
+			this.set({
+				error: v.reason,
+				pending: false
+			});
+			return false;
+		}
+		this.set({
+			question,
+			error: null,
+			notice: null
+		});
+		return this.play(v.plan, {
+			question,
+			questionType: "explain",
+			targetComponentId: v.plan.targetComponentId
+		});
+	}
+	current(token, model) {
+		return token === this.token && this.deps.getModel()?.id === model.id;
+	}
+	fallback(token, model, info, why) {
+		const snapshot = getSceneSnapshot(this.deps.dispatcher, model);
+		const v = validateTeachingPlan(buildComponentBrief(model, snapshot, info.targetComponentId && snapshot.components.some((c) => c.id === info.targetComponentId) ? info.targetComponentId : null, info.questionType), snapshot, this.deps.dispatcher.getContext());
+		if (!v.ok || !this.current(token, model)) {
+			this.set({
+				pending: false,
+				error: why
+			});
+			return "failed";
+		}
+		const englishNote = teachLanguage(info.language ?? this.deps.getLanguage()) !== "en-IN" ? " It is in English, because the model data is in English." : "";
+		this.set({ notice: `${why} ${FALLBACK_NOTICE}${englishNote}`.trim() });
+		return this.play(v.plan, info) ? "fallback" : "failed";
+	}
+	play(plan, info) {
+		if (this.deps.player.isActive()) this.deps.player.cancel("Replaced by your new question.");
+		const ok = this.deps.player.start(plan);
+		this.set({ pending: false });
+		if (ok) {
+			this.history.turns = [...this.history.turns, {
+				question: info.question,
+				targetComponentId: plan.targetComponentId,
+				title: plan.title
+			}].slice(-3);
+			this.deps.onPlanStarted?.(plan);
+		} else this.set({ error: this.deps.player.getState().message ?? "The explanation could not start." });
+		return ok;
+	}
+};
+// src/services/teaching/teachingSession.ts
+/**
+* Teaching session (Task V4): connects a question to a played plan.
+*
+* question (already resolved by V3) -> fact pack -> /api/teach (LLM on the server)
+*   -> validateTeachingPlan (live scene) -> TeachingPlanPlayer (V1 dispatcher, source 'ai')
+*   -> Gnani Timbre narration per step, captions shown in sync.
+*
+* Stale protection: every request has a token; a reply that arrives after a newer question,
+* a Cancel, or a model switch is discarded and never played.
+*/
+/**
+* Gnani Timbre narrator. prepare() starts fetching audio at once (so the next step's audio is
+* ready when needed); done resolves on the audio's real 'ended' event. If speech fails, the
+* caption stays up for a reading-time fallback (paused with the plan) so the lesson continues.
+*/
+function createTimbreNarrator(getLanguage, onSpeechError) {
+	let queue = Promise.resolve();
+	const synthesizeOnce = async (text, language, signal) => {
+		try {
+			return await synthesize(text, language, signal);
+		} catch (err) {
+			if (err.code !== "GNANI_RATE_LIMIT" || signal.aborted) throw err;
+			await new Promise((r) => setTimeout(r, 1500));
+			return synthesize(text, language, signal);
+		}
+	};
+	return { prepare(text, language) {
+		const controller = new AbortController();
+		const lang = teachLanguage(language ?? getLanguage());
+		const blobPromise = queue.then(() => controller.signal.aborted ? Promise.reject(/* @__PURE__ */ new Error("stopped")) : synthesizeOnce(text, lang, controller.signal));
+		queue = blobPromise.catch(() => void 0);
+		let audio = null;
+		let url = null;
+		let paused = false;
+		let stopped = false;
+		let fallbackLeft = Math.min(9e3, Math.max(1800, text.length * 65));
+		let fallbackTimer = null;
+		let resolveDone;
+		const done = new Promise((r) => resolveDone = r);
+		const finish = (v) => {
+			if (fallbackTimer) clearInterval(fallbackTimer);
+			if (url) URL.revokeObjectURL(url);
+			resolveDone(v);
+		};
+		const fallback = (msg) => {
+			onSpeechError(msg);
+			fallbackTimer = setInterval(() => {
+				if (paused || stopped) return;
+				fallbackLeft -= 100;
+				if (fallbackLeft <= 0) finish("failed");
+			}, 100);
+		};
+		return {
+			done,
+			play() {
+				blobPromise.then((blob) => {
+					if (stopped) return;
+					url = URL.createObjectURL(blob);
+					audio = new Audio(url);
+					audio.onended = () => finish("ended");
+					audio.onerror = () => fallback("Narration audio could not be played.");
+					if (!paused) audio.play().catch(() => fallback("The browser blocked narration audio."));
+				}, (err) => {
+					if (!stopped) fallback(`Narration unavailable: ${err.message}`);
+				});
+			},
+			pause() {
+				paused = true;
+				audio?.pause();
+			},
+			resume() {
+				paused = false;
+				if (audio && !audio.ended) audio.play().catch(() => fallback("The browser blocked narration audio."));
+			},
+			stop() {
+				stopped = true;
+				controller.abort();
+				audio?.pause();
+				finish("stopped");
+			}
+		};
+	} };
+}
+/** Mutable holder for values read by long-lived callbacks (player, narrator, controller). */
+var Latest = class {
+	value;
+	constructor(value) {
+		this.value = value;
+	}
+	get() {
+		return this.value;
+	}
+	set(value) {
+		this.value = value;
+	}
+};
+function useTeachingSession(opts) {
+	const { dispatcher, model, language } = opts;
+	const [latest] = useState(() => new Latest({
+		model,
+		language,
+		onPlanStarted: opts.onPlanStarted
+	}));
+	useEffect(() => {
+		latest.set({
+			model,
+			language,
+			onPlanStarted: opts.onPlanStarted
+		});
+	});
+	const [speechNote, setSpeechNote] = useState(null);
+	const [player] = useState(() => new TeachingPlanPlayer({
+		dispatcher,
+		getSnapshot: () => getSceneSnapshot(dispatcher, latest.get().model ?? null),
+		narrator: createTimbreNarrator(() => latest.get().language, setSpeechNote)
+	}));
+	const [controller] = useState(() => new TeachingController({
+		dispatcher,
+		player,
+		getModel: () => latest.get().model,
+		getLanguage: () => latest.get().language,
+		requestPlan: (body, signal) => requestTeachingPlan(body, signal),
+		onPlanStarted: (plan) => {
+			setSpeechNote(null);
+			latest.get().onPlanStarted?.(plan);
+		}
+	}));
+	const [state, setState] = useState(player.getState());
+	const [ctl, setCtl] = useState(controller.getState());
+	useEffect(() => player.subscribe(setState), [player]);
+	useEffect(() => controller.subscribe(setCtl), [controller]);
+	useEffect(() => {
+		const detach = player.attach();
+		return () => {
+			detach();
+			controller.cancel("Explanation stopped.");
+		};
+	}, [player, controller]);
+	useEffect(() => {
+		controller.modelChanged(model?.id ?? null);
+	}, [controller, model?.id]);
+	const ask = useCallback((info) => controller.ask(info), [controller]);
+	const playRaw = useCallback((raw, q) => controller.playRaw(raw, q), [controller]);
+	const supersede = useCallback((reason) => controller.supersede(reason), [controller]);
+	const isActive = useCallback(() => controller.isActive(), [controller]);
+	return {
+		state,
+		pending: ctl.pending,
+		error: ctl.error ?? speechNote,
+		notice: ctl.notice,
+		question: ctl.question,
+		plan: state.plan,
+		ask,
+		playRaw,
+		supersede,
+		abortRequest: supersede,
+		isActive,
+		player
+	};
+}
+// src/components/voice/VoiceDock.tsx
+/**
+* VoiceDock (Phase 11, Task V2) — push-to-talk voice control for the 3D workspace.
+*
+* mic -> 16 kHz WAV -> /api/voice/transcribe (Gnani Prisma) -> phrase parser
+*     -> V1 SceneCommandDispatcher (source 'voice') -> caption (+ Gnani Timbre speech)
+*
+* Every turn has an id; Cancel bumps it, so late transcripts or replies from a cancelled turn
+* are ignored and never executed. Captions are always shown.
+*
+* Task V4: explanation questions (why / how / what if / explain) become teaching requests when the
+* server's teaching model is configured; the TeachingPanel plays the validated plan.
+*/
+/** Example requests shown when the dock is idle (in the conversation language). */
+var EXAMPLES = {
+	"en-IN": [
+		"Explain this part",
+		"Why is it needed?",
+		"Show me the back",
+		"Zoom in"
+	],
+	"te-IN": [
+		"ఈ పార్ట్ ని ఎక్స్ప్లెయిన్ చెయ్యి",
+		"ఇది ఎందుకు అవసరం?",
+		"వెనుక వైపు చూపించు",
+		"జూమ్ ఇన్"
+	],
+	"hi-IN": [
+		"इसे एक्सप्लेन करो",
+		"इसकी जरूरत क्यों है?",
+		"पीछे से दिखाओ",
+		"ज़ूम इन करो"
+	]
+};
+/** Used until /api/voice/health answers (same list as the backend). */
+var FALLBACK_LANGUAGES = [
+	{
+		code: "en-IN",
+		name: "English",
+		native: "English",
+		status: "supported"
+	},
+	{
+		code: "te-IN",
+		name: "Telugu",
+		native: "తెలుగు",
+		status: "supported"
+	},
+	{
+		code: "hi-IN",
+		name: "Hindi",
+		native: "हिन्दी",
+		status: "supported"
+	},
+	{
+		code: "ta-IN",
+		name: "Tamil",
+		native: "தமிழ்",
+		status: "beta"
+	},
+	{
+		code: "kn-IN",
+		name: "Kannada",
+		native: "ಕನ್ನಡ",
+		status: "beta"
+	},
+	{
+		code: "ml-IN",
+		name: "Malayalam",
+		native: "മലയാളം",
+		status: "beta"
+	},
+	{
+		code: "bn-IN",
+		name: "Bengali",
+		native: "বাংলা",
+		status: "beta"
+	},
+	{
+		code: "mr-IN",
+		name: "Marathi",
+		native: "मराठी",
+		status: "beta"
+	},
+	{
+		code: "gu-IN",
+		name: "Gujarati",
+		native: "ગુજરાતી",
+		status: "beta"
+	},
+	{
+		code: "pa-IN",
+		name: "Punjabi",
+		native: "ਪੰਜਾਬੀ",
+		status: "beta"
+	}
+];
+var MIC_MESSAGES = {
+	MIC_DENIED: "Microphone access is blocked. Allow the microphone in the browser address bar, then try again.",
+	MIC_NOT_FOUND: "No microphone was found. Connect a microphone and try again.",
+	MIC_BUSY: "The microphone is being used by another application.",
+	MIC_UNSUPPORTED: "This browser cannot record audio. Use a recent Chrome or Edge.",
+	MIC_ERROR: "The microphone could not be started."
+};
+var CHIP_LABEL = {
+	executed: "✓ Done",
+	deferred: "⏳ Waiting until you stop moving the view",
+	rejected: "✗ Not done",
+	needsInput: "? Need more info",
+	answered: "ℹ Answer",
+	unavailable: "– Not available",
+	teach: "📘 Explaining",
+	control: "⏯ Explanation",
+	error: "⚠ Error",
+	cancelled: "■ Cancelled"
+};
+function readStoredLanguage() {
+	try {
+		return localStorage.getItem("voice.language") || "en-IN";
+	} catch {
+		return "en-IN";
+	}
+}
+var VoiceDock = ({ dispatcher, model, allModels, askRef }) => {
+	const [languages, setLanguages] = useState(FALLBACK_LANGUAGES);
+	const [language, setLanguage] = useState(readStoredLanguage);
+	const [phase, setPhase] = useState("idle");
+	const [level, setLevel] = useState(0);
+	const [transcript, setTranscript] = useState("");
+	const [caption, setCaption] = useState("");
+	const [chip, setChip] = useState(null);
+	const [notice, setNotice] = useState(null);
+	const [speakAll, setSpeakAll] = useState(true);
+	const [collapsed, setCollapsed] = useState(false);
+	const [teachingAvailable, setTeachingAvailable] = useState(false);
+	const lastDiscussedRef = useRef(null);
+	const pausedByMicRef = useRef(false);
+	const [topic, setTopic] = useState(null);
+	const teaching = useTeachingSession({
+		dispatcher,
+		model,
+		language,
+		onPlanStarted: (plan) => {
+			if (plan.targetComponentId) {
+				lastDiscussedRef.current = {
+					modelId: plan.modelId,
+					componentId: plan.targetComponentId
+				};
+				setTopic(lastDiscussedRef.current);
+			}
+		}
+	});
+	const teachingRef = useRef(teaching);
+	useEffect(() => {
+		teachingRef.current = teaching;
+	});
+	const turnRef = useRef(0);
+	const recordingRef = useRef(null);
+	const abortRef = useRef(null);
+	const audioRef = useRef(null);
+	const lastOutcomeRef = useRef(null);
+	const latest = useRef({
+		language,
+		model,
+		allModels,
+		speakAll,
+		teachingAvailable
+	});
+	useEffect(() => {
+		latest.current = {
+			language,
+			model,
+			allModels,
+			speakAll,
+			teachingAvailable
+		};
+	});
+	const languageInfo = languages.find((l) => l.code === language) ?? FALLBACK_LANGUAGES[0];
+	useEffect(() => {
+		const controller = new AbortController();
+		getVoiceHealth(controller.signal).then((health) => {
+			if (health.languages?.length) setLanguages(health.languages);
+			setNotice(health.keyConfigured ? null : VOICE_ERROR_MESSAGES.KEY_MISSING);
+			setTeachingAvailable(Boolean(health.teaching?.configured));
+		}, (err) => {
+			if (err.code === "CANCELLED") return;
+			setNotice(err instanceof VoiceServiceError ? err.message : VOICE_ERROR_MESSAGES.BACKEND_UNAVAILABLE);
+		});
+		return () => controller.abort();
+	}, []);
+	useEffect(() => {
+		try {
+			localStorage.setItem("voice.language", language);
+		} catch {}
+	}, [language]);
+	const stopPlayback = useCallback(() => {
+		if (audioRef.current) {
+			audioRef.current.pause();
+			URL.revokeObjectURL(audioRef.current.src);
+			audioRef.current = null;
+		}
+	}, []);
+	/** Speaks a reply with Gnani Timbre. Failures keep the caption and add a short note. */
+	const speak = useCallback(async (text, turn, language) => {
+		const lang = language ?? latest.current.language;
+		abortRef.current = new AbortController();
+		try {
+			const blob = await synthesize(text, lang, abortRef.current.signal);
+			if (turn !== turnRef.current) return;
+			stopPlayback();
+			const audio = new Audio(URL.createObjectURL(blob));
+			audioRef.current = audio;
+			setPhase("speaking");
+			audio.onended = () => {
+				if (audioRef.current === audio) stopPlayback();
+				if (turn === turnRef.current) setPhase("idle");
+			};
+			await audio.play().catch(() => {
+				if (turn === turnRef.current) setPhase("idle");
+			});
+		} catch (err) {
+			if (turn !== turnRef.current || err.code === "CANCELLED") return;
+			setNotice(`Spoken reply unavailable: ${err.message}`);
+			setPhase("idle");
+		}
+	}, [stopPlayback]);
+	/** Applies the result of one understood turn: captions, teaching, controls, speech. */
+	const applyResult = useCallback((result, turn, lang, m) => {
+		const session = teachingRef.current;
+		lastOutcomeRef.current = {
+			turn,
+			outcome: result.outcome
+		};
+		if (result.discussedComponentId) {
+			lastDiscussedRef.current = {
+				modelId: m.id,
+				componentId: result.discussedComponentId
+			};
+			setTopic(lastDiscussedRef.current);
+		}
+		setCaption(result.caption);
+		setChip(result.status);
+		if (result.status === "teach" && result.teach) {
+			const teachLang = result.teach.language ?? lang;
+			if (teachLang !== latest.current.language) setLanguage(teachLang);
+			session.ask({
+				...result.teach,
+				language: teachLang
+			});
+		}
+		if (result.status === "control") {
+			if (result.control === "pause") session.player.pause("Paused. Say “continue” when you are ready.");
+			else if (result.control === "resume") {
+				if (session.player.getState().status === "waitingForUser") session.player.continue();
+				else session.player.resume();
+			} else session.supersede("Explanation stopped.");
+		}
+		setPhase("idle");
+		if (result.speak) speak(result.caption, turn, lang);
+	}, [speak]);
+	/**
+	* Runs one turn from a transcript (microphone path and dev hook). `spokenLanguage` is the
+	* language the audio was understood in; typed text is judged by its script.
+	*/
+	const runTranscript = useCallback(async (text, turn, spokenLanguage) => {
+		const { language: uiLang, model: m, allModels: all, speakAll: sayAll } = latest.current;
+		const lang = spokenLanguage ?? turnLanguage(text, uiLang);
+		if (lang !== uiLang) setLanguage(lang);
+		setTranscript(text);
+		if (!m) {
+			setCaption(reply("VIEWER_NOT_READY", lang));
+			setChip("rejected");
+			setPhase("idle");
+			return;
+		}
+		if (!text.trim()) {
+			if (pausedByMicRef.current) {
+				pausedByMicRef.current = false;
+				teachingRef.current.player.resume();
+			}
+			setCaption(reply("emptyTranscript", lang));
+			setChip("needsInput");
+			speak(reply("emptyTranscript", lang), turn, lang);
+			return;
+		}
+		const session = teachingRef.current;
+		pausedByMicRef.current = false;
+		const turnInput = {
+			language: lang,
+			dispatcher,
+			model: m,
+			allModels: all,
+			speakConfirmations: sayAll,
+			lastDiscussed: lastDiscussedRef.current,
+			teachingAvailable: true,
+			teachingActive: session.isActive(),
+			onSupersede: () => session.supersede("Replaced by your new request.")
+		};
+		if (previewTurn({
+			...turnInput,
+			transcript: text
+		}).kind !== "noMatch") {
+			applyResult(handleVoiceTurn({
+				...turnInput,
+				transcript: text
+			}), turn, lang, m);
+			return;
+		}
+		setPhase("transcribing");
+		setCaption(reply("interpreting", lang));
+		setChip(null);
+		const scene = getSceneSnapshot(dispatcher, m, { lastDiscussed: lastDiscussedRef.current });
+		const lexicon = lexiconFor(m);
+		try {
+			const i = await requestInterpretation({
+				transcript: text.slice(0, 300),
+				language: lang,
+				modelId: m.id,
+				modelName: m.name,
+				components: lexicon.map((e) => ({
+					id: e.componentId,
+					name: e.displayName
+				})),
+				topicComponentId: scene.selectedComponentId ?? (scene.lastDiscussedComponentId.status === "known" ? scene.lastDiscussedComponentId.value : null),
+				teachingActive: session.isActive()
+			});
+			if (turn !== turnRef.current || latest.current.model?.id !== m.id) return;
+			const phrase = canonicalPhrase(i, (id) => lexicon.find((e) => e.componentId === id)?.displayName ?? null);
+			const answerLang = i.language ?? lang;
+			if (answerLang !== latest.current.language) setLanguage(answerLang);
+			if (!phrase) {
+				const key = i.intent === "unsupported" ? "unsupportedRequest" : "noMatch";
+				applyResult({
+					status: "rejected",
+					caption: reply(key, answerLang, { model: m.name }),
+					speak: true,
+					outcome: { kind: "noMatch" },
+					records: []
+				}, turn, answerLang, m);
+				return;
+			}
+			applyResult(handleVoiceTurn({
+				...turnInput,
+				language: answerLang,
+				transcript: phrase,
+				questionText: text
+			}), turn, answerLang, m);
+		} catch {
+			if (turn !== turnRef.current) return;
+			applyResult(handleVoiceTurn({
+				...turnInput,
+				transcript: text
+			}), turn, lang, m);
+		}
+	}, [
+		dispatcher,
+		speak,
+		applyResult
+	]);
+	/** Runs one turn from recorded audio (shared by the microphone path and the dev hook). */
+	const runAudio = useCallback(async (wav, turn) => {
+		setPhase("transcribing");
+		setTranscript("");
+		setCaption("");
+		setChip(null);
+		abortRef.current = new AbortController();
+		const signal = abortRef.current.signal;
+		try {
+			const m = latest.current.model;
+			const understood = (t) => Boolean(m) && previewTurn({
+				transcript: t,
+				dispatcher,
+				model: m,
+				allModels: latest.current.allModels,
+				lastDiscussed: lastDiscussedRef.current,
+				teachingActive: teachingRef.current.isActive()
+			}).kind !== "noMatch";
+			const heard = await transcribeWithLanguageRetry(wav, latest.current.language, (w, l, sg) => transcribe(w, l, sg), understood, signal);
+			if (turn !== turnRef.current) return;
+			setNotice(null);
+			await runTranscript(heard.text, turn, heard.language);
+		} catch (err) {
+			if (turn !== turnRef.current || err.code === "CANCELLED" || err.name === "AbortError") return;
+			setCaption(err.message);
+			setChip("error");
+			setPhase("idle");
+			if (err.code === "BACKEND_UNAVAILABLE" || err.code === "KEY_MISSING") setNotice(err.message);
+		}
+	}, [dispatcher, runTranscript]);
+	useEffect(() => {
+		return dispatcher.subscribe((rec) => {
+			if (rec.source !== "voice" || rec.status !== "executed" && rec.status !== "expired") return;
+			const last = lastOutcomeRef.current;
+			const { language: lang, model: m } = latest.current;
+			if (!last || last.turn !== turnRef.current || !m) return;
+			if (rec.status === "expired") {
+				setCaption(reply("expired", lang));
+				setChip("rejected");
+			} else {
+				setCaption((prev) => prev === reply("deferred", lang) ? confirmationCaption(last.outcome, lang, m) : prev);
+				setChip((prev) => prev === "deferred" ? "executed" : prev);
+			}
+		});
+	}, [dispatcher]);
+	const cancel = useCallback(() => {
+		turnRef.current += 1;
+		recordingRef.current?.cancel();
+		recordingRef.current = null;
+		abortRef.current?.abort();
+		stopPlayback();
+		pausedByMicRef.current = false;
+		teachingRef.current.supersede("Explanation stopped.");
+		setPhase("idle");
+		setLevel(0);
+		setCaption("Stopped.");
+		setChip("cancelled");
+	}, [stopPlayback]);
+	const startListening = useCallback(async () => {
+		const turn = ++turnRef.current;
+		abortRef.current?.abort();
+		stopPlayback();
+		const playing = teachingRef.current.player.getState().status;
+		if (playing === "running" || playing === "waitingForUser") {
+			teachingRef.current.player.pause("Listening…");
+			pausedByMicRef.current = true;
+		}
+		setTranscript("");
+		setCaption("");
+		setChip(null);
+		try {
+			const rec = await startRecording((l) => setLevel(Math.min(1, l * 8)));
+			if (turn !== turnRef.current) {
+				rec.cancel();
+				return;
+			}
+			recordingRef.current = rec;
+			setPhase("listening");
+			setNotice((n) => n && n.startsWith("Microphone") ? null : n);
+			const result = await rec.done;
+			recordingRef.current = null;
+			setLevel(0);
+			if (turn !== turnRef.current) return;
+			if (!result.wav) {
+				setPhase("idle");
+				if (pausedByMicRef.current) {
+					pausedByMicRef.current = false;
+					teachingRef.current.player.resume();
+				}
+				if (result.reason === "nospeech") {
+					setCaption("I didn't hear anything. Tap the mic and speak.");
+					setChip("rejected");
+				}
+				return;
+			}
+			await runAudio(result.wav, turn);
+		} catch (err) {
+			setPhase("idle");
+			setChip("error");
+			const code = err instanceof MicError ? err.code : "MIC_ERROR";
+			setCaption(MIC_MESSAGES[code]);
+			setNotice(MIC_MESSAGES[code]);
+		}
+	}, [runAudio, stopPlayback]);
+	const onMic = useCallback(() => {
+		if (phase === "listening") {
+			recordingRef.current?.stop();
+			return;
+		}
+		if (phase === "transcribing") return;
+		startListening();
+	}, [phase, startListening]);
+	useEffect(() => {}, [runTranscript, runAudio]);
+	useEffect(() => {
+		if (!askRef) return;
+		askRef.current = (text) => {
+			setCollapsed(false);
+			runTranscript(text, ++turnRef.current, latest.current.language);
+		};
+		return () => {
+			askRef.current = null;
+		};
+	}, [askRef, runTranscript]);
+	useEffect(() => {
+		const onKey = (e) => {
+			const tag = e.target?.tagName?.toLowerCase();
+			if (e.ctrlKey || e.metaKey || e.altKey || tag === "input" || tag === "textarea" || tag === "select") return;
+			if (e.key === "m" || e.key === "M") {
+				e.preventDefault();
+				onMic();
+			}
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [onMic]);
+	useEffect(() => () => {
+		turnRef.current += 1;
+		recordingRef.current?.cancel();
+		abortRef.current?.abort();
+		stopPlayback();
+	}, [stopPlayback]);
+	const busy = phase !== "idle" || teaching.pending;
+	const teachStatus = teaching.state.status;
+	const explaining = teachStatus === "running" || teachStatus === "paused" || teachStatus === "waitingForUser";
+	const agentState = phase === "listening" ? {
+		key: "listening",
+		icon: "●",
+		text: "Listening… I stop when you stop"
+	} : phase === "transcribing" ? {
+		key: "processing",
+		icon: "…",
+		text: "Understanding…"
+	} : teaching.pending ? {
+		key: "processing",
+		icon: "…",
+		text: "Preparing the explanation…"
+	} : teachStatus === "paused" ? {
+		key: "interrupted",
+		icon: "⏸",
+		text: "Explanation paused — say “continue” or ask something else"
+	} : teachStatus === "waitingForUser" ? {
+		key: "interrupted",
+		icon: "⏸",
+		text: "Waiting — say “continue” when ready"
+	} : teachStatus === "running" ? {
+		key: "speaking",
+		icon: "🔊",
+		text: `Explaining — step ${teaching.state.stepPosition + 1} of ${teaching.state.stepCount}`
+	} : phase === "speaking" ? {
+		key: "speaking",
+		icon: "🔊",
+		text: "Speaking…"
+	} : chip === "error" ? {
+		key: "error",
+		icon: "⚠",
+		text: "Something went wrong — see below"
+	} : {
+		key: "idle",
+		icon: "🎙",
+		text: "Tap the mic (or press M) and ask"
+	};
+	const topicName = topic && model && topic.modelId === model.id ? lexiconFor(model).find((e) => e.componentId === topic.componentId)?.displayName ?? null : null;
+	const examples = EXAMPLES[language] ?? EXAMPLES["en-IN"];
+	return /* @__PURE__ */ jsxs("section", {
+		className: `voice-dock state-${agentState.key} ${collapsed ? "collapsed" : ""}`,
+		"aria-label": "Voice tutor",
+		children: [/* @__PURE__ */ jsxs("div", {
+			className: "voice-dock-row",
+			children: [
+				/* @__PURE__ */ jsx("button", {
+					type: "button",
+					className: `voice-mic phase-${phase}`,
+					onClick: onMic,
+					disabled: phase === "transcribing",
+					"aria-label": phase === "listening" ? "Stop listening" : "Speak to the tutor",
+					"aria-keyshortcuts": "M",
+					title: phase === "listening" ? "Stop listening (M)" : "Speak to the tutor (M)",
+					style: { ["--voice-level"]: level.toFixed(2) },
+					children: /* @__PURE__ */ jsx("svg", {
+						viewBox: "0 0 24 24",
+						"aria-hidden": "true",
+						children: phase === "listening" ? /* @__PURE__ */ jsx("rect", {
+							x: "7",
+							y: "7",
+							width: "10",
+							height: "10",
+							rx: "2",
+							fill: "currentColor"
+						}) : /* @__PURE__ */ jsx("path", {
+							fill: "none",
+							stroke: "currentColor",
+							strokeWidth: "2",
+							strokeLinecap: "round",
+							d: "M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3"
+						})
+					})
+				}),
+				/* @__PURE__ */ jsxs("div", {
+					className: "voice-dock-main",
+					children: [/* @__PURE__ */ jsxs("div", {
+						className: "voice-dock-head",
+						children: [
+							/* @__PURE__ */ jsx("span", {
+								className: "voice-title",
+								children: "Voice tutor"
+							}),
+							/* @__PURE__ */ jsx("select", {
+								className: "voice-lang",
+								value: language,
+								onChange: (e) => setLanguage(e.target.value),
+								"aria-label": "Voice language",
+								disabled: busy,
+								children: languages.map((l) => /* @__PURE__ */ jsxs("option", {
+									value: l.code,
+									children: [l.native, l.status === "beta" ? " (beta)" : ""]
+								}, l.code))
+							}),
+							/* @__PURE__ */ jsx("button", {
+								type: "button",
+								className: "voice-collapse",
+								onClick: () => setCollapsed((c) => !c),
+								"aria-label": collapsed ? "Expand voice panel" : "Collapse voice panel",
+								children: collapsed ? "▾" : "▴"
+							})
+						]
+					}), /* @__PURE__ */ jsxs("div", {
+						className: "voice-status",
+						"aria-live": "polite",
+						children: [
+							/* @__PURE__ */ jsx("span", {
+								className: "voice-state-icon",
+								"aria-hidden": "true",
+								children: agentState.icon
+							}),
+							" ",
+							agentState.text
+						]
+					})]
+				}),
+				(busy || explaining) && /* @__PURE__ */ jsx("button", {
+					type: "button",
+					className: "voice-cancel",
+					onClick: cancel,
+					"aria-label": "Stop listening, speech and explanation",
+					children: "■ Stop"
+				})
+			]
+		}), !collapsed && /* @__PURE__ */ jsxs("div", {
+			className: "voice-dock-body",
+			children: [
+				languageInfo.status === "beta" && /* @__PURE__ */ jsxs("div", {
+					className: "voice-beta",
+					children: [languageInfo.name, " is in beta: speech recognition works, but commands use English words and replies are in English."]
+				}),
+				notice && /* @__PURE__ */ jsx("div", {
+					className: "voice-notice",
+					role: "alert",
+					children: notice
+				}),
+				topicName && /* @__PURE__ */ jsxs("div", {
+					className: "voice-topic",
+					children: [/* @__PURE__ */ jsx("span", { children: "Topic" }), topicName]
+				}),
+				!transcript && !caption && !teaching.plan && !teaching.pending && /* @__PURE__ */ jsxs("div", {
+					className: "voice-examples",
+					"aria-label": "Things you can say",
+					children: [/* @__PURE__ */ jsx("span", { children: "Try saying" }), examples.map((ex) => /* @__PURE__ */ jsx("q", { children: ex }, ex))]
+				}),
+				transcript && /* @__PURE__ */ jsxs("div", {
+					className: "voice-transcript",
+					children: [
+						/* @__PURE__ */ jsx("span", { children: "Heard" }),
+						"“",
+						transcript,
+						"”"
+					]
+				}),
+				(caption || chip) && /* @__PURE__ */ jsxs("div", {
+					className: `voice-caption chip-${chip ?? "none"}`,
+					"aria-live": "polite",
+					children: [chip && /* @__PURE__ */ jsx("span", {
+						className: "voice-chip",
+						children: CHIP_LABEL[chip]
+					}), /* @__PURE__ */ jsx("span", { children: caption })]
+				}),
+				/* @__PURE__ */ jsx(TeachingPanel, { session: teaching }),
+				/* @__PURE__ */ jsxs("label", {
+					className: "voice-toggle",
+					children: [/* @__PURE__ */ jsx("input", {
+						type: "checkbox",
+						checked: speakAll,
+						onChange: (e) => setSpeakAll(e.target.checked)
+					}), "Speak every reply (otherwise only problems are spoken)"]
+				})
+			]
+		})]
+	});
+};
 // src/components/workspace/WorkspaceLayout.tsx
+/** Commands owned by the workspace (React state), as opposed to the viewer (Three.js). */
+var WORKSPACE_COMMAND_TYPES = /* @__PURE__ */ new Set([
+	"component.select",
+	"component.visibility",
+	"component.showAll",
+	"assembly.explode",
+	"assembly.restore",
+	"lesson.start",
+	"lesson.next",
+	"lesson.previous",
+	"lesson.goTo",
+	"lesson.exit",
+	"workspace.switchModel",
+	"workspace.goHome"
+]);
+/** Default separation used by the X shortcut and explode commands without a factor. */
+var DEFAULT_EXPLODE_FACTOR = .75;
 /**
 * CAD-Style Technical Workspace Shell (Task 9.4)
 * Provides a responsive layout with top toolbar, collapsible assembly dock,
 * central flex-1 3D viewport, collapsible engineering inspector, and status telemetry.
 */
-var WorkspaceLayout = ({ activeModelId = PLANETARY_GEARBOX_MODEL_ID, renderFps, onFpsUpdate, camera, activeGesture, onGestureChange, detectedHands, onHandsDetected, selectedComponentId, onSelectComponent, showDiagnostics, onToggleDiagnostics, showRoadmap, onToggleRoadmap, modules, onNavigateHome }) => {
-	const [isLeftDockOpen, setIsLeftDockOpen] = useState(true);
-	const [isRightDockOpen, setIsRightDockOpen] = useState(true);
+var WorkspaceLayout = ({ activeModelId = PLANETARY_GEARBOX_MODEL_ID, renderFps, onFpsUpdate, camera, activeGesture, onGestureChange, detectedHands, onHandsDetected, selectedComponentId, onSelectComponent, showDiagnostics, onToggleDiagnostics, showRoadmap, onToggleRoadmap, modules, onNavigateHome, onSwitchModel }) => {
+	const [commandDispatcher] = useState(() => new SceneCommandDispatcher());
+	const voiceAskRef = useRef(null);
+	const askTutor = useCallback((text) => voiceAskRef.current?.(text), []);
+	const [isLeftDockOpen, setIsLeftDockOpen] = useState(() => typeof window === "undefined" || window.innerWidth > 1024);
+	const [isRightDockOpen, setIsRightDockOpen] = useState(() => typeof window === "undefined" || window.innerWidth > 1024);
 	const [hiddenComponentIds, setHiddenComponentIds] = useState(/* @__PURE__ */ new Set());
 	const [explodedFactor, setExplodedFactor] = useState(0);
 	const [isGuidedTourActive, setIsGuidedTourActive] = useState(false);
@@ -10363,6 +16141,132 @@ var WorkspaceLayout = ({ activeModelId = PLANETARY_GEARBOX_MODEL_ID, renderFps, 
 		setPreviousSelectionBeforeTour(null);
 		if (onNavigateHome) onNavigateHome();
 	}, [onNavigateHome]);
+	const workspaceRef = useRef({
+		activeModel,
+		selectedComponentId,
+		activeLesson,
+		isGuidedTourActive,
+		currentTourStep,
+		explodedFactor,
+		hiddenComponentIds,
+		handleSelectComponent,
+		handleExplodedFactorChange,
+		handleStartGuidedTour,
+		handleExitGuidedTour,
+		handleTourStepChange,
+		handleNavigateHomeWrapped,
+		onSwitchModel
+	});
+	useEffect(() => {
+		workspaceRef.current = {
+			activeModel,
+			selectedComponentId,
+			activeLesson,
+			isGuidedTourActive,
+			currentTourStep,
+			explodedFactor,
+			hiddenComponentIds,
+			handleSelectComponent,
+			handleExplodedFactorChange,
+			handleStartGuidedTour,
+			handleExitGuidedTour,
+			handleTourStepChange,
+			handleNavigateHomeWrapped,
+			onSwitchModel
+		};
+	});
+	useEffect(() => {
+		const unregisterContext = commandDispatcher.registerContextProvider("workspace", () => {
+			const ws = workspaceRef.current;
+			return {
+				modelId: ws.activeModel?.id ?? null,
+				componentIds: new Set(ws.activeModel?.getAllComponentIds() ?? []),
+				animationIds: (ws.activeModel?.animations ?? []).map((a) => a.id),
+				lesson: {
+					available: Boolean(ws.activeLesson && ws.activeLesson.steps.length > 0),
+					active: ws.isGuidedTourActive,
+					stepCount: ws.activeLesson?.steps.length ?? 0,
+					currentStep: ws.currentTourStep
+				},
+				registeredModelIds: new Set(modelRegistry.getAllModels().map((m) => m.id)),
+				selectedComponentId: ws.selectedComponentId,
+				workspaceFacts: {
+					hiddenComponentIds: [...ws.hiddenComponentIds],
+					explodedFactor: ws.explodedFactor,
+					lessonStepTitle: ws.isGuidedTourActive ? ws.activeLesson?.steps[ws.currentTourStep]?.title ?? null : null,
+					lessonStepComponentId: ws.isGuidedTourActive ? ws.activeLesson?.steps[ws.currentTourStep]?.componentId ?? null : null
+				}
+			};
+		});
+		const unregisterHandler = commandDispatcher.registerHandler({
+			id: "workspace",
+			canHandle: (type) => WORKSPACE_COMMAND_TYPES.has(type),
+			execute: (command, source) => {
+				const ws = workspaceRef.current;
+				switch (command.type) {
+					case "component.select":
+						ws.handleSelectComponent(command.componentId);
+						return { status: "executed" };
+					case "component.visibility":
+						setHiddenComponentIds((prev) => {
+							const next = new Set(prev);
+							command.componentIds.forEach((id) => command.visible ? next.delete(id) : next.add(id));
+							return next;
+						});
+						return { status: "executed" };
+					case "component.showAll":
+						setHiddenComponentIds(/* @__PURE__ */ new Set());
+						commandDispatcher.dispatch({
+							type: "component.isolate",
+							componentId: null
+						}, source);
+						return { status: "executed" };
+					case "assembly.explode":
+						ws.handleExplodedFactorChange(command.factor);
+						return { status: "executed" };
+					case "assembly.restore":
+						ws.handleExplodedFactorChange(0);
+						return { status: "executed" };
+					case "lesson.start":
+						if (ws.isGuidedTourActive) ws.handleTourStepChange(0);
+						else ws.handleStartGuidedTour();
+						return { status: "executed" };
+					case "lesson.next":
+						ws.handleTourStepChange(ws.currentTourStep + 1);
+						return { status: "executed" };
+					case "lesson.previous":
+						ws.handleTourStepChange(ws.currentTourStep - 1);
+						return { status: "executed" };
+					case "lesson.goTo":
+						ws.handleTourStepChange(command.stepIndex);
+						return { status: "executed" };
+					case "lesson.exit":
+						ws.handleExitGuidedTour();
+						return { status: "executed" };
+					case "workspace.switchModel":
+						if (!ws.onSwitchModel) return {
+							status: "rejected",
+							code: "NO_HANDLER",
+							detail: "Model switching is not available here."
+						};
+						ws.onSwitchModel(command.modelId);
+						return { status: "executed" };
+					case "workspace.goHome":
+						ws.handleNavigateHomeWrapped();
+						return { status: "executed" };
+					default: return {
+						status: "rejected",
+						code: "NO_HANDLER",
+						detail: `Workspace cannot handle "${command.type}".`
+					};
+				}
+			}
+		});
+		return () => {
+			unregisterContext();
+			unregisterHandler();
+		};
+	}, [commandDispatcher]);
 	const handleKeyDown = useCallback((e) => {
 		const targetTag = e.target?.tagName?.toLowerCase();
 		if (targetTag === "input" || targetTag === "textarea") return;
@@ -10374,12 +16278,15 @@ var WorkspaceLayout = ({ activeModelId = PLANETARY_GEARBOX_MODEL_ID, renderFps, 
 			setIsRightDockOpen((prev) => !prev);
 		} else if (e.key === "x" || e.key === "X") {
 			e.preventDefault();
-			setExplodedFactor((prev) => prev > 0 ? 0 : .75);
+			commandDispatcher.dispatch(workspaceRef.current.explodedFactor > 0 ? { type: "assembly.restore" } : {
+				type: "assembly.explode",
+				factor: DEFAULT_EXPLODE_FACTOR
+			}, "keyboard");
 		} else if (e.key === "l" || e.key === "L") {
 			e.preventDefault();
-			handleToggleGuidedTour();
+			commandDispatcher.dispatch({ type: workspaceRef.current.isGuidedTourActive ? "lesson.exit" : "lesson.start" }, "keyboard");
 		}
-	}, [handleToggleGuidedTour]);
+	}, [commandDispatcher]);
 	useEffect(() => {
 		window.addEventListener("keydown", handleKeyDown);
 		return () => window.removeEventListener("keydown", handleKeyDown);
@@ -10462,13 +16369,20 @@ var WorkspaceLayout = ({ activeModelId = PLANETARY_GEARBOX_MODEL_ID, renderFps, 
 									onSelectComponent: handleSelectComponent,
 									hiddenComponentIds,
 									explodedFactor,
-									onExplodedFactorChange: handleExplodedFactorChange
+									onExplodedFactorChange: handleExplodedFactorChange,
+									commandDispatcher
 								}),
 								isGuidedTourActive && activeLesson && /* @__PURE__ */ jsx(GuidedLearningPanel, {
 									lesson: activeLesson,
 									currentStepIndex: currentTourStep,
 									onStepChange: handleTourStepChange,
 									onExit: handleExitGuidedTour
+								}),
+								/* @__PURE__ */ jsx(VoiceDock, {
+									dispatcher: commandDispatcher,
+									model: activeModel,
+									allModels: modelRegistry.getAllModels(),
+									askRef: voiceAskRef
 								}),
 								/* @__PURE__ */ jsx(WebcamPreview, {
 									camera,
@@ -10552,7 +16466,8 @@ var WorkspaceLayout = ({ activeModelId = PLANETARY_GEARBOX_MODEL_ID, renderFps, 
 								children: /* @__PURE__ */ jsx(EngineeringInspectorPanel, {
 									componentId: selectedComponentId,
 									activeModel,
-									onClose: () => handleSelectComponent(null)
+									onClose: () => handleSelectComponent(null),
+									onAskTutor: askTutor
 								})
 							})
 						})]
@@ -11333,6 +17248,39 @@ describe("EngineeringInspectorPanel — Accessibility & Helpers", () => {
 		}));
 		assert.ok(htmlValue.includes("Speed"), "Expected label in output");
 		assert.ok(htmlValue.includes("1200 RPM"), "Expected value and unit in output");
+	});
+});
+describe("EngineeringInspectorPanel — Ask the voice tutor (voice-first milestone)", () => {
+	const gearboxModel = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+	it("shows the tutor buttons for a selected part only when wired to the voice tutor", () => {
+		const withTutor = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, {
+			componentId: "sun_gear",
+			activeModel: gearboxModel,
+			onClose: () => {},
+			onAskTutor: () => {}
+		}));
+		for (const label of [
+			"Ask the tutor",
+			"Explain",
+			"Why is it needed?",
+			"How does it work?",
+			"What if it fails?"
+		]) assert.ok(withTutor.includes(label), label);
+		const without = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, {
+			componentId: "sun_gear",
+			activeModel: gearboxModel,
+			onClose: () => {}
+		}));
+		assert.ok(!without.includes("Ask the tutor"));
+	});
+	it("empty state offers the voice tutor and keeps the existing guidance", () => {
+		const html = renderToStaticMarkup(React.createElement(EngineeringInspectorPanel, {
+			componentId: null,
+			onClose: () => {},
+			onAskTutor: () => {}
+		}));
+		assert.ok(html.includes("Voice tutor") && html.includes("Explain this model"));
+		assert.ok(html.includes("No Component Selected") && html.includes("Hold steady for 1.2s dwell"));
 	});
 });
 // src/utils/dashboardUtils.ts
@@ -12209,6 +18157,7 @@ var App = ({ initialView = "dashboard", initialModelId = PLANETARY_GEARBOX_MODEL
 	return /* @__PURE__ */ jsx(WorkspaceLayout, {
 		activeModelId,
 		onNavigateHome: handleNavigateHome,
+		onSwitchModel: handleLaunchModel,
 		renderFps,
 		onFpsUpdate: setRenderFps,
 		camera,
@@ -13035,6 +18984,18 @@ describe("CSS & Scroll Architecture (Task 10.1)", () => {
 			assert.ok(dashboardCss.includes("@media (max-width: 640px)"));
 			assert.ok(dashboardCss.includes("grid-template-columns: 1fr;"));
 		});
+		it("keeps the featured 3D preview out of the card height calculation (no canvas-driven expansion)", () => {
+			const rule = dashboardCss.match(/\.featured-visual-pane \.featured-canvas-preview \{([^}]*)\}/);
+			assert.ok(rule, "featured preview rule exists");
+			assert.match(rule[1], /position:\s*absolute/);
+			assert.match(rule[1], /inset:\s*0/);
+			assert.match(rule[1], /min-height:\s*0/);
+			assert.ok(!/\.featured-canvas-preview \{[^}]*min-height:\s*320px/.test(dashboardCss), "no fixed min-height on the canvas itself");
+		});
+		it("bounds the featured preview height in the stacked (<= 960px) layout", () => {
+			const stacked = dashboardCss.slice(dashboardCss.indexOf("@media (max-width: 960px)"));
+			assert.match(stacked, /\.featured-visual-pane \{[^}]*height:\s*clamp\(240px, 42vw, 340px\)/);
+		});
 	});
 	describe("3. CAD Workspace Contained Shell & Panel Scrolling (WorkspaceLayout.css)", () => {
 		it("contains CAD shell to 100vh/100dvh with overflow: hidden without locking outer document", () => {
@@ -13364,6 +19325,4359 @@ describe("Model Architecture Improvements (Phase 10)", () => {
 				assert.equal(val.errors.length, 0);
 			}
 		});
+	});
+});
+// tests/sceneCommands.test.ts
+/**
+* Unified Scene Command Channel Tests (Task V1)
+*
+* 1. Validation of untrusted command input against the live model context
+* 2. Dispatcher routing, history, listeners and fault isolation
+* 3. Smooth command-driven camera transitions (CameraController)
+* 4. Arbitration with live hand gestures and mouse drags (ViewerCommandExecutor)
+* 5. End-to-end with the real planetary gearbox model and lifecycle manager
+*/
+function createMockDom$1() {
+	const doc = {
+		addEventListener: () => {},
+		removeEventListener: () => {}
+	};
+	return {
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		ownerDocument: doc,
+		getRootNode: () => doc,
+		style: {}
+	};
+}
+function makeCamera(opts = {}) {
+	const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
+	return {
+		camera,
+		controller: new CameraController(camera, createMockDom$1(), {
+			enableDamping: false,
+			minDistance: 2,
+			maxDistance: 25,
+			autoRotate: opts.autoRotate ?? false
+		})
+	};
+}
+function gearboxContext(overrides = {}) {
+	const model = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+	return {
+		...EMPTY_COMMAND_CONTEXT,
+		modelId: model.id,
+		componentIds: new Set(model.getAllComponentIds()),
+		animationIds: (model.animations ?? []).map((a) => a.id),
+		supportsExplodedView: true,
+		viewerReady: true,
+		lesson: {
+			available: true,
+			active: false,
+			stepCount: 5,
+			currentStep: 0
+		},
+		registeredModelIds: new Set(modelRegistry.getAllModels().map((m) => m.id)),
+		...overrides
+	};
+}
+function hand(x) {
+	const landmarks = Array.from({ length: 21 }, () => ({
+		x,
+		y: .5,
+		z: 0
+	}));
+	landmarks[0] = {
+		x,
+		y: .62,
+		z: 0
+	};
+	landmarks[5] = {
+		x: x - .05,
+		y: .46,
+		z: 0
+	};
+	landmarks[9] = {
+		x,
+		y: .42,
+		z: 0
+	};
+	landmarks[13] = {
+		x: x + .04,
+		y: .45,
+		z: 0
+	};
+	landmarks[17] = {
+		x: x + .08,
+		y: .5,
+		z: 0
+	};
+	landmarks[4] = {
+		x: x - .1,
+		y: .45,
+		z: 0
+	};
+	landmarks[8] = {
+		x: x - .05,
+		y: .32,
+		z: 0
+	};
+	return [{
+		landmarks,
+		rawLandmarks: landmarks.map((p) => ({ ...p })),
+		handedness: "Right",
+		score: .95
+	}];
+}
+var PALM = {
+	gesture: "OPEN_PALM",
+	confidence: .95,
+	isStable: true,
+	handedness: "Right"
+};
+var NONE = {
+	gesture: "NONE",
+	confidence: 0,
+	isStable: true,
+	handedness: "Right"
+};
+/** Rig with a real gesture controller and an executor on a fake clock. */
+function makeRig() {
+	const { camera, controller } = makeCamera();
+	const gestures = new GestureCameraController(controller);
+	let clock = 1e3;
+	const animation = {
+		playing: true,
+		speed: 1
+	};
+	let autoOrbit = false;
+	const deferred = [];
+	const executor = new ViewerCommandExecutor({
+		camera: controller,
+		lifecycle: {
+			getComponentBounds: () => null,
+			isolateComponent: () => true,
+			getActiveModel: () => modelRegistry.getModel("planetary_gearbox") ?? null,
+			getActiveRuntime: () => null
+		},
+		isGestureInteracting: () => gestures.isInteracting(),
+		animation: {
+			setPlaying: (p) => animation.playing = p,
+			setSpeed: (s) => animation.speed = s
+		},
+		setAutoOrbit: (e) => autoOrbit = e,
+		now: () => clock
+	}, (cmd, _src, status) => deferred.push(`${cmd.type}:${status}`));
+	const advance = (ms) => {
+		clock += ms;
+	};
+	const frame = (g, h) => {
+		gestures.update(g, h);
+		executor.tick(clock);
+		controller.update(clock);
+	};
+	return {
+		camera,
+		controller,
+		gestures,
+		executor,
+		animation,
+		deferred,
+		advance,
+		frame,
+		getClock: () => clock,
+		getAutoOrbit: () => autoOrbit
+	};
+}
+describe("Scene command validation (untrusted input)", () => {
+	const ctx = gearboxContext();
+	it("rejects malformed and unknown commands", () => {
+		assert.equal(validateSceneCommand(null, ctx).ok, false);
+		assert.equal(validateSceneCommand("zoom in", ctx).ok, false);
+		assert.equal(validateSceneCommand([], ctx).ok, false);
+		const noType = validateSceneCommand({ direction: "in" }, ctx);
+		assert.ok(!noType.ok && noType.code === "MALFORMED");
+		const unknown = validateSceneCommand({ type: "scene.deleteEverything" }, ctx);
+		assert.ok(!unknown.ok && unknown.code === "UNKNOWN_COMMAND");
+	});
+	it("strips unexpected fields so injected data never reaches handlers", () => {
+		const res = validateSceneCommand({
+			type: "camera.zoom",
+			direction: "in",
+			eval: "alert(1)",
+			steps: 2
+		}, ctx);
+		assert.ok(res.ok);
+		assert.deepEqual(res.command, {
+			type: "camera.zoom",
+			direction: "in",
+			steps: 2
+		});
+	});
+	it("validates orbit ranges and fills defaults", () => {
+		assert.ok(!validateSceneCommand({
+			type: "camera.orbit",
+			yawDeg: 0
+		}, ctx).ok);
+		assert.ok(!validateSceneCommand({
+			type: "camera.orbit",
+			yawDeg: 720
+		}, ctx).ok);
+		assert.ok(!validateSceneCommand({
+			type: "camera.orbit",
+			yawDeg: "left"
+		}, ctx).ok);
+		const ok = validateSceneCommand({
+			type: "camera.orbit",
+			yawDeg: 30
+		}, ctx);
+		assert.ok(ok.ok);
+		assert.deepEqual(ok.command, {
+			type: "camera.orbit",
+			yawDeg: 30,
+			pitchDeg: 0
+		});
+	});
+	it("validates pan direction and amount", () => {
+		assert.ok(!validateSceneCommand({
+			type: "camera.pan",
+			direction: "forward"
+		}, ctx).ok);
+		assert.ok(!validateSceneCommand({
+			type: "camera.pan",
+			direction: "left",
+			amount: 5
+		}, ctx).ok);
+		const ok = validateSceneCommand({
+			type: "camera.pan",
+			direction: "right"
+		}, ctx);
+		assert.ok(ok.ok && ok.command.type === "camera.pan" && ok.command.amount === .15);
+	});
+	it("validates zoom steps", () => {
+		assert.ok(!validateSceneCommand({
+			type: "camera.zoom",
+			direction: "sideways"
+		}, ctx).ok);
+		assert.ok(!validateSceneCommand({
+			type: "camera.zoom",
+			direction: "in",
+			steps: 0
+		}, ctx).ok);
+		assert.ok(!validateSceneCommand({
+			type: "camera.zoom",
+			direction: "in",
+			steps: 1.5
+		}, ctx).ok);
+	});
+	it("rejects the unsupported bottom view with an explanation, accepts back/left/right", () => {
+		const bottom = validateSceneCommand({
+			type: "camera.view",
+			view: "bottom"
+		}, ctx);
+		assert.ok(!bottom.ok && /ground grid/.test(bottom.reason));
+		for (const view of [
+			"back",
+			"left",
+			"right",
+			"isometric",
+			"top",
+			"front"
+		]) assert.ok(validateSceneCommand({
+			type: "camera.view",
+			view
+		}, ctx).ok, view);
+	});
+	it("rejects component IDs that do not exist in the loaded model", () => {
+		const bridgePart = validateSceneCommand({
+			type: "component.select",
+			componentId: "top_chords"
+		}, ctx);
+		assert.ok(!bridgePart.ok && bridgePart.code === "UNKNOWN_COMPONENT");
+		const invented = validateSceneCommand({
+			type: "component.focus",
+			componentId: "piston"
+		}, ctx);
+		assert.ok(!invented.ok && invented.code === "UNKNOWN_COMPONENT");
+		assert.ok(validateSceneCommand({
+			type: "component.select",
+			componentId: "sun_gear"
+		}, ctx).ok);
+		assert.ok(validateSceneCommand({
+			type: "component.select",
+			componentId: null
+		}, ctx).ok);
+		assert.ok(validateSceneCommand({
+			type: "component.isolate",
+			componentId: null
+		}, ctx).ok);
+	});
+	it("validates visibility lists (non-empty, all known, de-duplicated)", () => {
+		assert.ok(!validateSceneCommand({
+			type: "component.visibility",
+			componentIds: [],
+			visible: false
+		}, ctx).ok);
+		const mixed = validateSceneCommand({
+			type: "component.visibility",
+			componentIds: ["sun_gear", "ghost"],
+			visible: false
+		}, ctx);
+		assert.ok(!mixed.ok && mixed.code === "UNKNOWN_COMPONENT");
+		const ok = validateSceneCommand({
+			type: "component.visibility",
+			componentIds: ["sun_gear", "sun_gear"],
+			visible: false
+		}, ctx);
+		assert.ok(ok.ok && ok.command.type === "component.visibility" && ok.command.componentIds.length === 1);
+	});
+	it("requires the viewer for camera, focus, isolate and animation commands", () => {
+		const notReady = gearboxContext({ viewerReady: false });
+		for (const cmd of [
+			{
+				type: "camera.zoom",
+				direction: "in"
+			},
+			{
+				type: "component.focus",
+				componentId: "sun_gear"
+			},
+			{ type: "animation.play" }
+		]) {
+			const res = validateSceneCommand(cmd, notReady);
+			assert.ok(!res.ok && res.code === "VIEWER_NOT_READY", cmd.type);
+		}
+	});
+	it("rejects exploded-view commands for models without one, and bad factors", () => {
+		const noExplode = gearboxContext({ supportsExplodedView: false });
+		assert.ok(!validateSceneCommand({
+			type: "assembly.explode",
+			factor: .5
+		}, noExplode).ok);
+		assert.ok(!validateSceneCommand({ type: "assembly.restore" }, noExplode).ok);
+		assert.ok(!validateSceneCommand({
+			type: "assembly.explode",
+			factor: 1.5
+		}, ctx).ok);
+		assert.ok(validateSceneCommand({
+			type: "assembly.explode",
+			factor: .6
+		}, ctx).ok);
+	});
+	it("only allows animation commands for models that declare a real animation", () => {
+		const bridge = modelRegistry.getModel(WARREN_TRUSS_MODEL_ID);
+		const res = validateSceneCommand({ type: "animation.play" }, gearboxContext({
+			modelId: bridge.id,
+			componentIds: new Set(bridge.getAllComponentIds()),
+			animationIds: (bridge.animations ?? []).map((a) => a.id)
+		}));
+		assert.ok(!res.ok && res.code === "UNSUPPORTED_ANIMATION");
+		assert.ok(validateSceneCommand({ type: "animation.play" }, ctx).ok);
+		assert.ok(!validateSceneCommand({
+			type: "animation.setSpeed",
+			speed: 10
+		}, ctx).ok);
+		assert.ok(validateSceneCommand({
+			type: "animation.setSpeed",
+			speed: .5
+		}, ctx).ok);
+	});
+	it("declares the gearbox animation honestly and none for the bridge (whose update hook is a no-op)", () => {
+		assert.deepEqual(modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID).animations?.map((a) => a.id), ["gear_train_rotation"]);
+		assert.equal(modelRegistry.getModel("warren_truss_bridge").animations?.length ?? 0, 0);
+	});
+	it("validates lesson state and step bounds", () => {
+		const noLesson = gearboxContext({ lesson: {
+			available: false,
+			active: false,
+			stepCount: 0,
+			currentStep: 0
+		} });
+		assert.ok(!validateSceneCommand({ type: "lesson.start" }, noLesson).ok);
+		const next = validateSceneCommand({ type: "lesson.next" }, ctx);
+		assert.ok(!next.ok && next.code === "LESSON_NOT_ACTIVE");
+		const active = gearboxContext({ lesson: {
+			available: true,
+			active: true,
+			stepCount: 5,
+			currentStep: 0
+		} });
+		assert.ok(validateSceneCommand({ type: "lesson.next" }, active).ok);
+		assert.ok(!validateSceneCommand({
+			type: "lesson.goTo",
+			stepIndex: 5
+		}, active).ok);
+		assert.ok(validateSceneCommand({
+			type: "lesson.goTo",
+			stepIndex: 4
+		}, active).ok);
+	});
+	it("only switches to registered models", () => {
+		const res = validateSceneCommand({
+			type: "workspace.switchModel",
+			modelId: "v8_engine"
+		}, ctx);
+		assert.ok(!res.ok && res.code === "UNKNOWN_MODEL");
+		assert.ok(validateSceneCommand({
+			type: "workspace.switchModel",
+			modelId: WARREN_TRUSS_MODEL_ID
+		}, ctx).ok);
+	});
+});
+describe("SceneCommandDispatcher", () => {
+	function makeDispatcher() {
+		const dispatcher = new SceneCommandDispatcher(() => 42);
+		dispatcher.registerContextProvider("test", () => gearboxContext());
+		const calls = [];
+		dispatcher.registerHandler({
+			id: "h",
+			canHandle: (t) => t.startsWith("camera."),
+			execute: (cmd, source) => {
+				calls.push(`${cmd.type}@${source}`);
+				return { status: "executed" };
+			}
+		});
+		return {
+			dispatcher,
+			calls
+		};
+	}
+	it("routes valid commands to the owning handler and records the source", () => {
+		const { dispatcher, calls } = makeDispatcher();
+		const rec = dispatcher.dispatch({
+			type: "camera.zoom",
+			direction: "in"
+		}, "voice");
+		assert.equal(rec.status, "executed");
+		assert.equal(rec.source, "voice");
+		assert.deepEqual(calls, ["camera.zoom@voice"]);
+	});
+	it("rejects without calling any handler when validation fails", () => {
+		const { dispatcher, calls } = makeDispatcher();
+		const rec = dispatcher.dispatch({
+			type: "component.select",
+			componentId: "piston"
+		}, "ai");
+		assert.equal(rec.status, "rejected");
+		assert.equal(rec.code, "UNKNOWN_COMPONENT");
+		assert.equal(calls.length, 0);
+	});
+	it("reports NO_HANDLER for valid commands nobody owns", () => {
+		const { dispatcher } = makeDispatcher();
+		const rec = dispatcher.dispatch({ type: "animation.play" }, "ui");
+		assert.equal(rec.status, "rejected");
+		assert.equal(rec.code, "NO_HANDLER");
+	});
+	it("never throws when a handler or listener fails", () => {
+		const dispatcher = new SceneCommandDispatcher();
+		dispatcher.registerContextProvider("t", () => gearboxContext());
+		dispatcher.registerHandler({
+			id: "bad",
+			canHandle: () => true,
+			execute: () => {
+				throw new Error("boom");
+			}
+		});
+		dispatcher.subscribe(() => {
+			throw new Error("listener boom");
+		});
+		const rec = dispatcher.dispatch({ type: "camera.reset" }, "ui");
+		assert.equal(rec.status, "rejected");
+		assert.match(rec.detail ?? "", /boom/);
+	});
+	it("notifies listeners and keeps a bounded history", () => {
+		const { dispatcher } = makeDispatcher();
+		const seen = [];
+		const unsubscribe = dispatcher.subscribe((r) => seen.push(r.status));
+		for (let i = 0; i < 60; i++) dispatcher.dispatch({ type: "camera.reset" }, "ui");
+		unsubscribe();
+		dispatcher.dispatch({ type: "camera.reset" }, "ui");
+		assert.equal(seen.length, 60);
+		assert.equal(dispatcher.getHistory().length, 50);
+	});
+	it("merges context from several providers and unregisters cleanly", () => {
+		const dispatcher = new SceneCommandDispatcher();
+		dispatcher.registerContextProvider("workspace", () => ({ modelId: "planetary_gearbox" }));
+		const off = dispatcher.registerContextProvider("viewer", () => ({ viewerReady: true }));
+		assert.equal(dispatcher.getContext().modelId, "planetary_gearbox");
+		assert.equal(dispatcher.getContext().viewerReady, true);
+		off();
+		assert.equal(dispatcher.getContext().viewerReady, false);
+	});
+});
+describe("CameraController command transitions", () => {
+	it("moves smoothly to the back view over the transition duration", () => {
+		const { camera, controller } = makeCamera();
+		const startDist = controller.getDistance();
+		controller.goToView("back", 400, 0);
+		controller.update(200);
+		assert.ok(controller.isTransitioning());
+		assert.ok(camera.position.z > -startDist * .9, "not yet at the back at mid-transition");
+		controller.update(400);
+		assert.equal(controller.isTransitioning(), false);
+		assert.ok(camera.position.z < 0, "camera ends behind the model");
+		assert.ok(Math.abs(controller.getDistance() - startDist) < .01, "distance preserved");
+		assert.ok(controller.controls.target.length() < 1e-6, "target preserved");
+	});
+	it("reaches fixed presets exactly when animated", () => {
+		const { camera, controller } = makeCamera();
+		controller.goToView("top", 300, 0);
+		controller.update(300);
+		assert.ok(camera.position.distanceTo(CAMERA_PRESETS.top.position) < .01);
+	});
+	it("accumulates rapid orbit commands from the goal pose (two 45° = 90°)", () => {
+		const { camera, controller } = makeCamera();
+		const start = new THREE.Spherical().setFromVector3(camera.position.clone());
+		controller.orbitBy(Math.PI / 4, 0, 300, 0);
+		controller.update(100);
+		controller.orbitBy(Math.PI / 4, 0, 300, 100);
+		controller.update(400);
+		let d = new THREE.Spherical().setFromVector3(camera.position.clone()).theta - start.theta;
+		d = Math.atan2(Math.sin(d), Math.cos(d));
+		assert.ok(Math.abs(d - Math.PI / 2) < .02, `expected 90°, got ${THREE.MathUtils.radToDeg(d)}`);
+	});
+	it("clamps smooth zoom to the distance limits", () => {
+		const { controller } = makeCamera();
+		controller.zoomSmooth(1e-4, 100, 0);
+		controller.update(100);
+		assert.ok(Math.abs(controller.getDistance() - 2) < .01);
+		controller.zoomSmooth(1e3, 100, 200);
+		controller.update(300);
+		assert.ok(Math.abs(controller.getDistance() - 25) < .01);
+	});
+	it("pans camera and target together, keeping the view direction", () => {
+		const { camera, controller } = makeCamera();
+		const offsetBefore = camera.position.clone().sub(controller.controls.target);
+		controller.panBy(.2, 0, 100, 0);
+		controller.update(100);
+		const offsetAfter = camera.position.clone().sub(controller.controls.target);
+		assert.ok(controller.controls.target.length() > .5, "target moved");
+		assert.ok(offsetAfter.distanceTo(offsetBefore) < .01, "view direction and distance unchanged");
+	});
+	it("suspends auto-orbit during a transition and restores it afterwards", () => {
+		const { controller } = makeCamera({ autoRotate: true });
+		controller.goToView("front", 200, 0);
+		assert.equal(controller.controls.autoRotate, false);
+		assert.equal(controller.isAutoRotating(), true, "intent preserved");
+		controller.update(200);
+		assert.equal(controller.controls.autoRotate, true);
+	});
+	it("remembers an auto-orbit change requested during a transition", () => {
+		const { controller } = makeCamera({ autoRotate: true });
+		controller.goToView("front", 200, 0);
+		controller.setAutoRotate(false);
+		controller.update(200);
+		assert.equal(controller.controls.autoRotate, false);
+	});
+	it("an instant preset (key/button) cancels a running transition", () => {
+		const { camera, controller } = makeCamera();
+		controller.goToView("back", 400, 0);
+		controller.update(100);
+		controller.setPreset("top");
+		assert.equal(controller.isTransitioning(), false);
+		controller.update(400);
+		assert.ok(camera.position.distanceTo(CAMERA_PRESETS.top.position) < .01);
+	});
+});
+describe("Command arbitration with live gestures and mouse", () => {
+	it("defers a camera command while an open-palm gesture is orbiting, then runs it on release", () => {
+		const rig = makeRig();
+		rig.frame(PALM, hand(.5));
+		for (let i = 1; i <= 3; i++) rig.frame(PALM, hand(.5 + i * .03));
+		assert.equal(rig.gestures.isInteracting(), true);
+		const distBefore = rig.controller.getDistance();
+		const outcome = rig.executor.execute({
+			type: "camera.zoom",
+			direction: "in",
+			steps: 1
+		}, "voice");
+		assert.equal(outcome.status, "deferred");
+		rig.advance(16);
+		rig.frame(PALM, hand(.59));
+		assert.ok(Math.abs(rig.controller.getDistance() - distBefore) < .01, "zoom must not fight the hand");
+		rig.advance(16);
+		rig.frame(NONE, []);
+		assert.deepEqual(rig.deferred, ["camera.zoom:executed"]);
+		rig.advance(500);
+		rig.frame(NONE, []);
+		assert.ok(rig.controller.getDistance() < distBefore * .8, "zoom applied after release");
+	});
+	it("keeps only the latest deferred camera command", () => {
+		const rig = makeRig();
+		rig.frame(PALM, hand(.5));
+		for (let i = 1; i <= 3; i++) rig.frame(PALM, hand(.5 + i * .03));
+		rig.executor.execute({
+			type: "camera.zoom",
+			direction: "in"
+		}, "voice");
+		rig.executor.execute({
+			type: "camera.view",
+			view: "top"
+		}, "voice");
+		assert.deepEqual(rig.executor.getPending(), {
+			type: "camera.view",
+			view: "top"
+		});
+		assert.deepEqual(rig.deferred, ["camera.zoom:expired"]);
+	});
+	it("expires a deferred command if the hand keeps steering past the timeout", () => {
+		const rig = makeRig();
+		rig.frame(PALM, hand(.5));
+		for (let i = 1; i <= 3; i++) rig.frame(PALM, hand(.5 + i * .03));
+		rig.executor.execute({ type: "camera.reset" }, "voice");
+		for (let i = 0; i < 6; i++) {
+			rig.advance(PENDING_TTL_MS / 4);
+			rig.frame(PALM, hand(.6 + i % 2 * .03));
+		}
+		assert.equal(rig.executor.getPending(), null);
+		assert.deepEqual(rig.deferred, ["camera.reset:expired"]);
+	});
+	it("a hand that starts orbiting mid-transition takes over without snapping back", () => {
+		const rig = makeRig();
+		rig.executor.execute({
+			type: "camera.view",
+			view: "back"
+		}, "voice");
+		rig.advance(100);
+		rig.frame(NONE, []);
+		assert.equal(rig.controller.isTransitioning(), true);
+		rig.frame(PALM, hand(.5));
+		for (let i = 1; i <= 3; i++) {
+			rig.advance(16);
+			rig.frame(PALM, hand(.5 + i * .03));
+		}
+		assert.equal(rig.controller.isTransitioning(), false, "transition cancelled by the hand");
+		const takenOver = rig.camera.position.clone();
+		rig.advance(1e3);
+		rig.frame(NONE, []);
+		assert.ok(rig.camera.position.distanceTo(takenOver) < .05, "camera stays where the hand left it");
+	});
+	it("defers camera commands during a mouse drag too", () => {
+		const rig = makeRig();
+		rig.controller.controls.dispatchEvent({ type: "start" });
+		assert.equal(rig.executor.execute({
+			type: "camera.orbit",
+			yawDeg: 30
+		}, "voice").status, "deferred");
+		rig.controller.controls.dispatchEvent({ type: "end" });
+		rig.frame(NONE, []);
+		assert.deepEqual(rig.deferred, ["camera.orbit:executed"]);
+	});
+	it("runs non-camera commands immediately even while the hand is steering", () => {
+		const rig = makeRig();
+		rig.frame(PALM, hand(.5));
+		for (let i = 1; i <= 3; i++) rig.frame(PALM, hand(.5 + i * .03));
+		assert.equal(rig.executor.execute({ type: "animation.pause" }, "voice").status, "executed");
+		assert.equal(rig.animation.playing, false);
+		assert.equal(rig.executor.execute({
+			type: "animation.setSpeed",
+			speed: .5
+		}, "voice").status, "executed");
+		assert.equal(rig.animation.speed, .5);
+		assert.equal(rig.executor.execute({
+			type: "camera.autoOrbit",
+			enabled: true
+		}, "voice").status, "executed");
+		assert.equal(rig.getAutoOrbit(), true);
+	});
+});
+describe("End-to-end: dispatcher + viewer executor + real planetary gearbox", () => {
+	function makeEndToEnd() {
+		const scene = new THREE.Scene();
+		const { camera, controller } = makeCamera();
+		const lifecycle = new ModelLifecycleManager({
+			scene,
+			camera,
+			cameraController: controller
+		});
+		assert.ok(lifecycle.loadModel(PLANETARY_GEARBOX_MODEL_ID).success);
+		let clock = 0;
+		const executor = new ViewerCommandExecutor({
+			camera: controller,
+			lifecycle,
+			isGestureInteracting: () => false,
+			animation: {
+				setPlaying: () => {},
+				setSpeed: () => {}
+			},
+			setAutoOrbit: () => {},
+			now: () => clock
+		});
+		const model = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+		const dispatcher = new SceneCommandDispatcher();
+		dispatcher.registerContextProvider("workspace", () => ({
+			modelId: model.id,
+			componentIds: new Set(model.getAllComponentIds()),
+			animationIds: (model.animations ?? []).map((a) => a.id),
+			registeredModelIds: new Set(modelRegistry.getAllModels().map((m) => m.id))
+		}));
+		dispatcher.registerContextProvider("viewer", executor.contextProvider);
+		dispatcher.registerHandler(executor);
+		return {
+			scene,
+			controller,
+			lifecycle,
+			dispatcher,
+			tick: (ms) => {
+				clock += ms;
+				controller.update(clock);
+			}
+		};
+	}
+	it("reports viewer readiness and exploded-view support from the loaded runtime", () => {
+		const { dispatcher } = makeEndToEnd();
+		const ctx = dispatcher.getContext();
+		assert.equal(ctx.viewerReady, true);
+		assert.equal(ctx.supportsExplodedView, true);
+	});
+	it("focuses the camera smoothly on a real component", () => {
+		const { controller, lifecycle, dispatcher, tick } = makeEndToEnd();
+		const rec = dispatcher.dispatch({
+			type: "component.focus",
+			componentId: "ring_gear"
+		}, "voice");
+		assert.equal(rec.status, "executed");
+		tick(400);
+		const center = lifecycle.getComponentBounds("ring_gear").getCenter(new THREE.Vector3());
+		assert.ok(controller.controls.target.distanceTo(center) < .01);
+	});
+	it("isolates a component and restores the full assembly", () => {
+		const { lifecycle, dispatcher } = makeEndToEnd();
+		assert.equal(dispatcher.dispatch({
+			type: "component.isolate",
+			componentId: "sun_gear"
+		}, "voice").status, "executed");
+		assert.equal(lifecycle.getIsolatedComponentId(), "sun_gear");
+		assert.equal(dispatcher.dispatch({
+			type: "component.isolate",
+			componentId: null
+		}, "voice").status, "executed");
+		assert.equal(lifecycle.getIsolatedComponentId(), null);
+	});
+	it("isolated components actually render (no hidden ancestor container) — regression", () => {
+		for (const id of [
+			"sun_gear",
+			"ring_gear",
+			"planet_carrier",
+			"central_shaft"
+		]) {
+			const { lifecycle, dispatcher } = makeEndToEnd();
+			dispatcher.dispatch({
+				type: "component.isolate",
+				componentId: id
+			}, "voice");
+			const root = lifecycle.getActiveRuntime().rootGroup;
+			let renderedMeshes = 0;
+			let otherRendered = 0;
+			root.traverse((obj) => {
+				if (!obj.isMesh) return;
+				let worldVisible = true;
+				for (let o = obj; o; o = o.parent) worldVisible &&= o.visible;
+				const compId = obj.userData?.componentId;
+				if (worldVisible && compId === id) renderedMeshes++;
+				if (worldVisible && compId && compId !== id) otherRendered++;
+			});
+			assert.ok(renderedMeshes > 0, `${id} must be visible on screen when isolated`);
+			assert.equal(otherRendered, 0, `only ${id} renders`);
+		}
+	});
+	it("restoring isolation brings back the whole assembly on screen", () => {
+		const { lifecycle, dispatcher } = makeEndToEnd();
+		dispatcher.dispatch({
+			type: "component.isolate",
+			componentId: "sun_gear"
+		}, "voice");
+		dispatcher.dispatch({
+			type: "component.isolate",
+			componentId: null
+		}, "voice");
+		const root = lifecycle.getActiveRuntime().rootGroup;
+		let hiddenParts = 0;
+		root.traverse((obj) => {
+			if (!obj.isMesh || !obj.userData?.componentId) return;
+			let worldVisible = true;
+			for (let o = obj; o; o = o.parent) worldVisible &&= o.visible;
+			if (!worldVisible) hiddenParts++;
+		});
+		assert.equal(hiddenParts, 0);
+	});
+	it("safely rejects parts from another model without touching the scene", () => {
+		const { controller, dispatcher } = makeEndToEnd();
+		const before = controller.camera.position.clone();
+		const rec = dispatcher.dispatch({
+			type: "component.focus",
+			componentId: "bridge_deck"
+		}, "ai");
+		assert.equal(rec.status, "rejected");
+		assert.equal(rec.code, "UNKNOWN_COMPONENT");
+		assert.ok(controller.camera.position.equals(before));
+	});
+});
+// tests/voice.test.ts
+/**
+* Voice layer tests (Task V2) — no network, no microphone.
+* 1. Part lexicon built from the loaded model
+* 2. Phrase parser: English, Telugu, Hindi and code-mixed commands
+* 3. Voice turns through the REAL V1 dispatcher + viewer executor + gearbox model
+* 4. Replies, recorder helpers and voice client error handling
+*/
+var gearbox$4 = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+var bridge$4 = modelRegistry.getModel(WARREN_TRUSS_MODEL_ID);
+var ALL$4 = modelRegistry.getAllModels();
+function ctxFor(model = gearbox$4, extra = {}) {
+	return {
+		lexicon: lexiconFor(model),
+		foreignParts: foreignPartsFor(model, ALL$4),
+		selectedComponentId: null,
+		lessonActive: false,
+		...extra
+	};
+}
+var parse = (text, extra = {}, model = gearbox$4) => parseVoiceCommand(text, ctxFor(model, extra));
+var cmds$1 = (o) => o.kind === "commands" ? o.commands : null;
+describe("Part lexicon is built from the loaded model", () => {
+	it("covers every gearbox component with English and native-script names", () => {
+		const lex = buildPartLexicon(gearbox$4);
+		assert.deepEqual(lex.map((e) => e.componentId).sort(), [...gearbox$4.getAllComponentIds()].sort());
+		const sun = lex.find((e) => e.componentId === "sun_gear");
+		assert.ok(sun.phrases.includes("sun gear"));
+		assert.ok(sun.phrases.includes("సన్ గేర్"));
+		assert.ok(sun.phrases.includes("सन गियर"));
+		const ring = lex.find((e) => e.componentId === "ring_gear");
+		assert.ok(ring.phrases.includes("ring gear") && ring.phrases.includes("outer annulus"));
+	});
+	it("keeps single words only when they identify exactly one part", () => {
+		const lex = buildPartLexicon(gearbox$4);
+		const owners = lex.filter((e) => e.phrases.includes("gear"));
+		assert.equal(owners.length, 0, "\"gear\" alone is ambiguous and must not be a part name");
+		assert.ok(lex.find((e) => e.componentId === "central_shaft").phrases.includes("shaft"));
+	});
+	it("works for a different model (bridge) with no gearbox assumptions", () => {
+		const lex = buildPartLexicon(bridge$4);
+		assert.deepEqual(lex.map((e) => e.componentId).sort(), [...bridge$4.getAllComponentIds()].sort());
+		assert.ok(lex.find((e) => e.componentId === "bridge_deck").phrases.some((p) => p.includes("deck")));
+	});
+});
+describe("Phrase parser — English", () => {
+	for (const [text, expected] of [
+		["Zoom in", [{
+			type: "camera.zoom",
+			direction: "in"
+		}]],
+		["zoom out please", [{
+			type: "camera.zoom",
+			direction: "out"
+		}]],
+		["Move left", [{
+			type: "camera.pan",
+			direction: "left"
+		}]],
+		["move the view up", [{
+			type: "camera.pan",
+			direction: "up"
+		}]],
+		["Rotate left", [{
+			type: "camera.orbit",
+			yawDeg: 30,
+			pitchDeg: 0
+		}]],
+		["rotate the gearbox", [{
+			type: "camera.orbit",
+			yawDeg: -30,
+			pitchDeg: 0
+		}]],
+		["Show me the back", [{
+			type: "camera.view",
+			view: "back"
+		}]],
+		["top view", [{
+			type: "camera.view",
+			view: "top"
+		}]],
+		["show the left side", [{
+			type: "camera.view",
+			view: "left"
+		}]],
+		["Restore the original view", [{ type: "camera.reset" }]],
+		["Explode the assembly", [{
+			type: "assembly.explode",
+			factor: .75
+		}]],
+		["Restore the assembly", [{ type: "assembly.restore" }]],
+		["put everything back together", [{ type: "assembly.restore" }]],
+		["Pause the animation", [{ type: "animation.pause" }]],
+		["play the animation", [{ type: "animation.play" }]],
+		["slow down the animation", [{
+			type: "animation.setSpeed",
+			speed: .5
+		}]],
+		["show all parts", [{ type: "component.showAll" }]],
+		["start the lesson", [{ type: "lesson.start" }]],
+		["go home", [{ type: "workspace.goHome" }]]
+	]) it(`"${text}"`, () => assert.deepEqual(cmds$1(parse(text)), expected));
+	it("\"Select the sun gear\" selects the real component", () => {
+		assert.deepEqual(cmds$1(parse("Select the sun gear")), [{
+			type: "component.select",
+			componentId: "sun_gear"
+		}]);
+	});
+	it("\"Separate this part\" isolates the selected part (select + isolate + focus)", () => {
+		assert.deepEqual(cmds$1(parse("Separate this part", { selectedComponentId: "planet_carrier" })), [
+			{
+				type: "component.select",
+				componentId: "planet_carrier"
+			},
+			{
+				type: "component.isolate",
+				componentId: "planet_carrier"
+			},
+			{
+				type: "component.focus",
+				componentId: "planet_carrier"
+			}
+		]);
+	});
+	it("\"Separate this part\" with nothing selected asks for a selection", () => {
+		assert.equal(parse("Separate this part").kind, "needsSelection");
+	});
+	it("\"hide the ring gear\" and \"focus on the shaft\"", () => {
+		assert.deepEqual(cmds$1(parse("hide the ring gear")), [{
+			type: "component.visibility",
+			componentIds: ["ring_gear"],
+			visible: false
+		}]);
+		assert.deepEqual(cmds$1(parse("focus on the shaft")), [{
+			type: "component.select",
+			componentId: "central_shaft"
+		}, {
+			type: "component.focus",
+			componentId: "central_shaft"
+		}]);
+	});
+	it("\"select the planet gear\" is ambiguous (three planet gears)", () => {
+		const o = parse("select the planet gear");
+		assert.equal(o.kind, "ambiguous");
+		assert.deepEqual(o.kind === "ambiguous" && o.options.sort(), [
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3"
+		]);
+	});
+	it("\"select planet gear B\" picks exactly one", () => {
+		assert.deepEqual(cmds$1(parse("select planet gear b")), [{
+			type: "component.select",
+			componentId: "planet_gear_2"
+		}]);
+	});
+	it("rejects a piston on the gearbox instead of inventing it", () => {
+		const o = parse("select the piston");
+		assert.equal(o.kind, "unknownPart");
+		assert.equal(o.kind === "unknownPart" && o.spoken, "piston");
+	});
+	it("a crankshaft is not mistaken for the gearbox shaft", () => {
+		assert.equal(parse("focus on the crankshaft").kind, "unknownPart");
+	});
+	it("a bridge part on the gearbox is reported as belonging to the bridge", () => {
+		const o = parse("select the bridge deck");
+		assert.ok(o.kind === "unknownPart" && o.belongsTo === bridge$4.name);
+	});
+	it("lesson navigation only when a lesson is running", () => {
+		assert.deepEqual(cmds$1(parse("next step", { lessonActive: true })), [{ type: "lesson.next" }]);
+		assert.notDeepEqual(cmds$1(parse("next step")), [{ type: "lesson.next" }]);
+	});
+	it("unrelated speech is not turned into an action", () => {
+		assert.equal(parse("what is the weather today").kind, "noMatch");
+		assert.equal(parse("").kind, "noMatch");
+	});
+});
+describe("Phrase parser — Telugu (incl. Telugu-English code-mixing)", () => {
+	for (const [text, expected] of [
+		["జూమ్ ఇన్ చెయ్యి", [{
+			type: "camera.zoom",
+			direction: "in"
+		}]],
+		["జూమ్ అవుట్ చేయండి", [{
+			type: "camera.zoom",
+			direction: "out"
+		}]],
+		["దగ్గరగా చూపించు జూమ్", [{
+			type: "camera.zoom",
+			direction: "in"
+		}]],
+		["ఎడమ వైపు జరుపు", [{
+			type: "camera.pan",
+			direction: "left"
+		}]],
+		["కుడికి తిప్పు", [{
+			type: "camera.orbit",
+			yawDeg: -30,
+			pitchDeg: 0
+		}]],
+		["వెనుక వైపు చూపించు", [{
+			type: "camera.view",
+			view: "back"
+		}]],
+		["భాగాలను విడదీయి", [{
+			type: "assembly.explode",
+			factor: .75
+		}]],
+		["మళ్లీ కలుపు", [{ type: "assembly.restore" }]],
+		["యానిమేషన్ ఆపు", [{ type: "animation.pause" }]],
+		["రీసెట్ చేయి", [{ type: "camera.reset" }]],
+		["zoom in చెయ్యి", [{
+			type: "camera.zoom",
+			direction: "in"
+		}]],
+		["left కి move చేయి", [{
+			type: "camera.pan",
+			direction: "left"
+		}]]
+	]) it(`"${text}"`, () => assert.deepEqual(cmds$1(parse(text)), expected));
+	it("\"సన్ గేర్ ని సెలెక్ట్ చెయ్యి\" (Telugu script) selects the sun gear", () => {
+		assert.deepEqual(cmds$1(parse("సన్ గేర్ ని సెలెక్ట్ చెయ్యి")), [{
+			type: "component.select",
+			componentId: "sun_gear"
+		}]);
+	});
+	it("\"sun gear ని select చెయ్యి\" (mixed script) selects the sun gear", () => {
+		assert.deepEqual(cmds$1(parse("sun gear ని select చెయ్యి")), [{
+			type: "component.select",
+			componentId: "sun_gear"
+		}]);
+	});
+	it("\"దీన్ని వేరుగా చూపించు\" isolates the selected part", () => {
+		const o = cmds$1(parse("దీన్ని వేరుగా చూపించు", { selectedComponentId: "ring_gear" }));
+		assert.deepEqual(o?.[1], {
+			type: "component.isolate",
+			componentId: "ring_gear"
+		});
+	});
+	it("\"పిస్టన్ చూపించు\" is rejected on the gearbox", () => {
+		assert.equal(parse("పిస్టన్ చూపించు").kind, "unknownPart");
+	});
+});
+describe("Phrase parser — Hindi (incl. Hindi-English code-mixing)", () => {
+	for (const [text, expected] of [
+		["ज़ूम इन करो", [{
+			type: "camera.zoom",
+			direction: "in"
+		}]],
+		["जूम आउट कीजिए", [{
+			type: "camera.zoom",
+			direction: "out"
+		}]],
+		["बाएं खिसकाओ", [{
+			type: "camera.pan",
+			direction: "left"
+		}]],
+		["दाएं घुमाओ", [{
+			type: "camera.orbit",
+			yawDeg: -30,
+			pitchDeg: 0
+		}]],
+		["पीछे से दिखाइये", [{
+			type: "camera.view",
+			view: "back"
+		}]],
+		["ऊपर से दिखाओ", [{
+			type: "camera.view",
+			view: "top"
+		}]],
+		["सब जोड़ दो", [{ type: "assembly.restore" }]],
+		["एनिमेशन रोको", [{ type: "animation.pause" }]],
+		["एक्सप्लोड करो", [{
+			type: "assembly.explode",
+			factor: .75
+		}]],
+		["zoom in करो", [{
+			type: "camera.zoom",
+			direction: "in"
+		}]]
+	]) it(`"${text}"`, () => assert.deepEqual(cmds$1(parse(text)), expected));
+	it("\"सन गियर सेलेक्ट करो\" selects the sun gear", () => {
+		assert.deepEqual(cmds$1(parse("सन गियर सेलेक्ट करो")), [{
+			type: "component.select",
+			componentId: "sun_gear"
+		}]);
+	});
+	it("\"इसे अलग करो\" isolates the selected part", () => {
+		const o = cmds$1(parse("इसे अलग करो", { selectedComponentId: "sun_gear" }));
+		assert.deepEqual(o?.[1], {
+			type: "component.isolate",
+			componentId: "sun_gear"
+		});
+	});
+	it("\"पिस्टन दिखाओ\" is rejected on the gearbox", () => {
+		assert.equal(parse("पिस्टन दिखाओ").kind, "unknownPart");
+	});
+});
+describe("Phrase parser — live Prisma transcripts", () => {
+	const partIds = (o) => o.kind === "commands" ? o.commands.flatMap((c) => "componentIds" in c ? c.componentIds : "componentId" in c ? [c.componentId] : []) : [];
+	for (const [text, type, part] of [
+		[
+			"zoom in",
+			"camera.zoom",
+			null
+		],
+		[
+			"show the sun gear",
+			"component.select",
+			"sun_gear"
+		],
+		[
+			"rotate left",
+			"camera.orbit",
+			null
+		],
+		[
+			"isolate the ring gear",
+			"component.select",
+			"ring_gear"
+		],
+		[
+			"జూమ్ ఇన్ చేయండి",
+			"camera.zoom",
+			null
+		],
+		[
+			"ఎడమ వైపు తిప్పు",
+			"camera.orbit",
+			null
+		],
+		[
+			"రింగ్ ఎయిర్ ని ఐసొలేట్ చేయండి",
+			"component.select",
+			"ring_gear"
+		],
+		[
+			"ప్లానెట్ క్యారియర్ ని దాచు",
+			"component.visibility",
+			"planet_carrier"
+		],
+		[
+			"ज़ूम इन करो।",
+			"camera.zoom",
+			null
+		],
+		[
+			"सन गियर दिखाओ।",
+			"component.select",
+			"sun_gear"
+		],
+		[
+			"बाएं घुमाओ",
+			"camera.orbit",
+			null
+		],
+		[
+			"रिंग इयर को आइसोलेट करो।",
+			"component.select",
+			"ring_gear"
+		],
+		[
+			"प्लानेट कैरियर को छुपाओ।",
+			"component.visibility",
+			"planet_carrier"
+		]
+	]) it(`"${text}" -> ${type}${part ? ` (${part})` : ""}`, () => {
+		const o = parse(text);
+		assert.equal(o.kind, "commands", JSON.stringify(o));
+		if (o.kind !== "commands") return;
+		assert.equal(o.commands[0].type, type);
+		if (part) assert.ok(partIds(o).every((id) => id === part), JSON.stringify(o.commands));
+	});
+	it("\"show me the piston\" is rejected as a part the gearbox does not have", () => {
+		assert.equal(parse("show me the piston").kind, "unknownPart");
+	});
+	it("\"సంగీత చూపించు\" (Prisma mis-heard \"సన్ గేర్\") does not act on any part", () => {
+		const o = parse("సంగీత చూపించు");
+		assert.notEqual(o.kind, "commands", JSON.stringify(o));
+	});
+});
+function createMockDom() {
+	const doc = {
+		addEventListener: () => {},
+		removeEventListener: () => {}
+	};
+	return {
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		ownerDocument: doc,
+		getRootNode: () => doc,
+		style: {}
+	};
+}
+function makeChannel(opts = {}) {
+	const model = opts.model ?? gearbox$4;
+	const scene = new THREE.Scene();
+	const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
+	const controller = new CameraController(camera, createMockDom(), {
+		enableDamping: false,
+		autoRotate: false
+	});
+	const lifecycle = new ModelLifecycleManager({
+		scene,
+		camera,
+		cameraController: controller
+	});
+	lifecycle.loadModel(model.id);
+	let clock = 0;
+	const anim = { playing: true };
+	const dispatcher = new SceneCommandDispatcher();
+	const executor = new ViewerCommandExecutor({
+		camera: controller,
+		lifecycle,
+		isGestureInteracting: opts.handSteering ?? (() => false),
+		animation: {
+			setPlaying: (p) => anim.playing = p,
+			setSpeed: () => {}
+		},
+		setAutoOrbit: () => {},
+		now: () => clock
+	}, (cmd, src, status, detail) => dispatcher.reportDeferredOutcome(cmd, src, status, detail));
+	const state = {
+		selected: opts.selected ?? null,
+		exploded: 0
+	};
+	dispatcher.registerContextProvider("workspace", () => ({
+		modelId: model.id,
+		componentIds: new Set(model.getAllComponentIds()),
+		animationIds: (model.animations ?? []).map((a) => a.id),
+		registeredModelIds: new Set(ALL$4.map((m) => m.id)),
+		selectedComponentId: state.selected
+	}));
+	dispatcher.registerContextProvider("viewer", executor.contextProvider);
+	dispatcher.registerHandler(executor);
+	dispatcher.registerHandler({
+		id: "workspace",
+		canHandle: (t) => t === "component.select" || t.startsWith("assembly."),
+		execute: (cmd) => {
+			if (cmd.type === "component.select") state.selected = cmd.componentId;
+			if (cmd.type === "assembly.explode") state.exploded = cmd.factor;
+			if (cmd.type === "assembly.restore") state.exploded = 0;
+			return { status: "executed" };
+		}
+	});
+	const turn = (transcript, language = "en-IN", speakConfirmations = false) => handleVoiceTurn({
+		transcript,
+		language,
+		dispatcher,
+		model,
+		allModels: ALL$4,
+		speakConfirmations
+	});
+	return {
+		dispatcher,
+		executor,
+		controller,
+		lifecycle,
+		state,
+		anim,
+		turn,
+		tick: (ms) => {
+			clock += ms;
+			controller.update(clock);
+		}
+	};
+}
+describe("Voice turns go through the V1 SceneCommandDispatcher", () => {
+	it("records every voice command with source \"voice\" and executes it", () => {
+		const ch = makeChannel();
+		const before = ch.controller.getDistance();
+		const res = ch.turn("zoom in");
+		assert.equal(res.status, "executed");
+		assert.equal(res.caption, "Zooming in.");
+		assert.equal(res.speak, false, "quick confirmations are caption-only by default");
+		assert.equal(ch.dispatcher.getHistory().at(-1).source, "voice");
+		ch.tick(400);
+		assert.ok(ch.controller.getDistance() < before);
+	});
+	it("Telugu turn executes and replies in Telugu", () => {
+		const ch = makeChannel();
+		const res = ch.turn("సన్ గేర్ ని సెలెక్ట్ చెయ్యి", "te-IN");
+		assert.equal(res.status, "executed");
+		assert.equal(ch.state.selected, "sun_gear");
+		assert.match(res.caption, /Sun Gear ఎంచుకున్నాను/);
+	});
+	it("Hindi turn executes and replies in Hindi", () => {
+		const ch = makeChannel();
+		const res = ch.turn("एक्सप्लोड करो", "hi-IN");
+		assert.equal(res.status, "executed");
+		assert.equal(ch.state.exploded, .75);
+		assert.match(res.caption, /अलग/);
+	});
+	it("a nonexistent part leaves the scene untouched and explains why (spoken)", () => {
+		const ch = makeChannel();
+		const historyBefore = ch.dispatcher.getHistory().length;
+		const camBefore = ch.controller.camera.position.clone();
+		const res = ch.turn("select the piston");
+		assert.equal(res.status, "rejected");
+		assert.equal(res.speak, true);
+		assert.equal(res.caption, "Piston is not part of the Epicyclic Planetary Gearbox.");
+		assert.equal(ch.dispatcher.getHistory().length, historyBefore, "nothing was dispatched");
+		assert.ok(ch.controller.camera.position.equals(camBefore));
+		assert.equal(ch.state.selected, null);
+	});
+	it("V1 validation still applies: animation on the bridge is rejected with a spoken reason", () => {
+		const res = makeChannel({ model: bridge$4 }).turn("play the animation");
+		assert.equal(res.status, "rejected");
+		assert.equal(res.records.at(-1).code, "UNSUPPORTED_ANIMATION");
+		assert.match(res.caption, /no animation/);
+	});
+	it("a camera command while the hand is steering is deferred, then runs on release", () => {
+		let steering = true;
+		const ch = makeChannel({ handSteering: () => steering });
+		const res = ch.turn("show me the back");
+		assert.equal(res.status, "deferred");
+		assert.equal(res.speak, true);
+		assert.equal(res.records[0].status, "deferred");
+		steering = false;
+		const outcomes = [];
+		ch.dispatcher.subscribe((r) => outcomes.push(`${r.source}:${r.status}`));
+		ch.executor.tick(1);
+		assert.deepEqual(outcomes, ["voice:executed"]);
+	});
+	it("\"separate this part\" isolates the selected component on the real model", () => {
+		const ch = makeChannel({ selected: "sun_gear" });
+		const res = ch.turn("separate this part");
+		assert.equal(res.status, "executed");
+		assert.equal(ch.lifecycle.getIsolatedComponentId(), "sun_gear");
+		assert.equal(res.caption, "Showing only Sun Gear.");
+	});
+	it("\"speak all replies\" makes confirmations spoken", () => {
+		assert.equal(makeChannel().turn("zoom out", "en-IN", true).speak, true);
+	});
+});
+describe("Voice replies", () => {
+	it("English, Telugu and Hindi define every reply", () => {
+		for (const lang of [
+			"en-IN",
+			"te-IN",
+			"hi-IN"
+		]) for (const key of REPLY_KEYS) assert.ok(REPLY_TABLES[lang][key], `${lang}.${key}`);
+	});
+	it("beta languages fall back to English replies", () => {
+		assert.equal(replyLanguage("ta-IN"), "en-IN");
+		assert.equal(reply("zoomIn", "kn-IN"), "Zooming in.");
+	});
+	it("fills placeholders and leaves none behind", () => {
+		const text = reply("unknownPartOtherModel", "te-IN", {
+			part: "Bridge Deck",
+			other: "Warren Truss Bridge",
+			model: "Gearbox"
+		});
+		assert.ok(!/[{}]/.test(text));
+		assert.match(reply("view", "hi-IN", { view: "left" }), /बाईं/);
+	});
+});
+describe("Recorder helpers", () => {
+	it("encodes a valid 16 kHz mono WAV with downsampling", () => {
+		const wav = encodeWav([(/* @__PURE__ */ new Float32Array(48e3)).fill(.5)], 48e3);
+		const v = new DataView(wav.buffer);
+		assert.equal(String.fromCharCode(...wav.slice(0, 4)), "RIFF");
+		assert.equal(v.getUint32(24, true), 16e3);
+		assert.equal(v.getUint32(40, true), 32e3, "1 s of audio");
+		assert.ok(Math.abs(v.getInt16(44, true) - 16383.5) < 2);
+	});
+	it("detects end of speech after silence, adapting to background noise", () => {
+		const d = new SpeechEndDetector();
+		const frame = 43;
+		for (let i = 0; i < 6; i++) assert.equal(d.push(.02, frame), null);
+		for (let i = 0; i < 10; i++) assert.equal(d.push(.2, frame), null);
+		assert.equal(d.speechStarted, true);
+		let end = null;
+		for (let i = 0; i < 40 && !end; i++) end = d.push(.02, frame);
+		assert.equal(end, "silence");
+	});
+	it("gives up when nobody speaks, and enforces the 25 s cap", () => {
+		const quiet = new SpeechEndDetector();
+		let end = null;
+		for (let i = 0; i < 300 && !end; i++) end = quiet.push(.004, 43);
+		assert.equal(end, "nospeech");
+		const talker = new SpeechEndDetector();
+		end = null;
+		for (let i = 0; i < 6; i++) talker.push(.004, 43);
+		for (let i = 0; i < 1e3 && !end; i++) end = talker.push(.3, 43);
+		assert.equal(end, "max");
+	});
+	it("maps microphone errors to clear codes", () => {
+		assert.equal(classifyMicError({ name: "NotAllowedError" }).code, "MIC_DENIED");
+		assert.equal(classifyMicError({ name: "NotFoundError" }).code, "MIC_NOT_FOUND");
+		assert.equal(classifyMicError({ name: "NotReadableError" }).code, "MIC_BUSY");
+		assert.equal(rms(new Float32Array([.5, -.5])), .5);
+	});
+});
+describe("Voice client error handling", () => {
+	const jsonResponse = (status, body) => new Response(JSON.stringify(body), {
+		status,
+		headers: { "Content-Type": "application/json" }
+	});
+	it("surfaces backend error codes (no credits / rate limit / key missing)", async () => {
+		for (const code of [
+			"GNANI_FORBIDDEN",
+			"GNANI_RATE_LIMIT",
+			"KEY_MISSING"
+		]) {
+			const fake = async () => jsonResponse(502, { error: {
+				code,
+				message: "x"
+			} });
+			await assert.rejects(transcribe(new Blob(["x"]), "en-IN", void 0, fake), (e) => e instanceof VoiceServiceError && e.code === code);
+		}
+	});
+	it("reports the backend as unavailable when the proxy returns a non-JSON 5xx or the fetch fails", async () => {
+		const proxyDown = async () => new Response("Bad Gateway", { status: 502 });
+		await assert.rejects(getVoiceHealth(void 0, proxyDown), (e) => e.code === "BACKEND_UNAVAILABLE");
+		const offline = async () => {
+			throw new TypeError("Failed to fetch");
+		};
+		await assert.rejects(synthesize("hi", "en-IN", void 0, offline), (e) => e.code === "BACKEND_UNAVAILABLE");
+	});
+	it("cancellation yields CANCELLED, so stale results are never used", async () => {
+		const controller = new AbortController();
+		const slow = (_, init) => new Promise((_res, rej) => {
+			init?.signal?.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError")));
+		});
+		const pending = transcribe(new Blob(["x"]), "te-IN", controller.signal, slow);
+		controller.abort();
+		await assert.rejects(pending, (e) => e.code === "CANCELLED");
+	});
+	it("returns the transcript on success", async () => {
+		const ok = async () => jsonResponse(200, {
+			transcript: "zoom in",
+			language: "en-IN"
+		});
+		assert.equal(await transcribe(new Blob(["x"]), "en-IN", void 0, ok), "zoom in");
+	});
+});
+// tests/sceneContext.test.ts
+/**
+* Task V3 — scene snapshot, component reference resolution, relationships and multi-component
+* highlighting. Runs the real dispatcher, viewer executor, camera controller, model lifecycle
+* (real procedural geometry) and voice session; only the React workspace state is simulated.
+*/
+var gearbox$3 = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+var bridge$3 = modelRegistry.getModel(WARREN_TRUSS_MODEL_ID);
+var ALL$3 = modelRegistry.getAllModels();
+function mockDom() {
+	const doc = {
+		addEventListener: () => {},
+		removeEventListener: () => {}
+	};
+	return {
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		ownerDocument: doc,
+		getRootNode: () => doc,
+		style: {}
+	};
+}
+/**
+* The workspace + viewer wiring of WorkspaceLayout/ViewerCanvas, without React or WebGL.
+* Workspace state is a plain object updated synchronously by the workspace handler.
+*/
+function makeWorkspace(startModel = gearbox$3) {
+	const scene = new THREE.Scene();
+	const camera = new THREE.PerspectiveCamera(45, 1, .1, 100);
+	const controller = new CameraController(camera, mockDom(), {
+		enableDamping: false,
+		autoRotate: false
+	});
+	const lifecycle = new ModelLifecycleManager({
+		scene,
+		camera,
+		cameraController: controller
+	});
+	let clock = 0;
+	const ws = {
+		model: startModel,
+		selected: null,
+		hidden: /* @__PURE__ */ new Set(),
+		exploded: 0,
+		lessonActive: false,
+		lessonStep: 0
+	};
+	const pointer = {
+		componentId: null,
+		source: null
+	};
+	const anim = {
+		playing: true,
+		speed: 1
+	};
+	const steer = { on: false };
+	lifecycle.loadModel(ws.model.id);
+	const dispatcher = new SceneCommandDispatcher();
+	const executor = new ViewerCommandExecutor({
+		camera: controller,
+		lifecycle,
+		isGestureInteracting: () => steer.on,
+		animation: {
+			setPlaying: (p) => anim.playing = p,
+			setSpeed: (s) => anim.speed = s
+		},
+		setAutoOrbit: () => {},
+		getPointer: () => pointer,
+		getAnimationState: () => ({ ...anim }),
+		now: () => clock
+	}, (cmd, src, status, detail) => dispatcher.reportDeferredOutcome(cmd, src, status, detail));
+	dispatcher.registerContextProvider("workspace", () => {
+		const lesson = getGuidedLessonForModel(ws.model.id);
+		return {
+			modelId: ws.model.id,
+			componentIds: new Set(ws.model.getAllComponentIds()),
+			animationIds: (ws.model.animations ?? []).map((a) => a.id),
+			lesson: {
+				available: Boolean(lesson?.steps.length),
+				active: ws.lessonActive,
+				stepCount: lesson?.steps.length ?? 0,
+				currentStep: ws.lessonStep
+			},
+			registeredModelIds: new Set(ALL$3.map((m) => m.id)),
+			selectedComponentId: ws.selected,
+			workspaceFacts: {
+				hiddenComponentIds: [...ws.hidden],
+				explodedFactor: ws.exploded,
+				lessonStepTitle: ws.lessonActive ? lesson?.steps[ws.lessonStep]?.title ?? null : null,
+				lessonStepComponentId: ws.lessonActive ? lesson?.steps[ws.lessonStep]?.componentId ?? null : null
+			}
+		};
+	});
+	dispatcher.registerContextProvider("viewer", executor.contextProvider);
+	dispatcher.registerHandler(executor);
+	dispatcher.registerHandler({
+		id: "workspace",
+		canHandle: (t) => [
+			"component.select",
+			"component.visibility",
+			"component.showAll",
+			"assembly.explode",
+			"assembly.restore",
+			"lesson.start",
+			"lesson.next",
+			"lesson.exit",
+			"workspace.switchModel"
+		].includes(t),
+		execute: (cmd, source) => {
+			switch (cmd.type) {
+				case "component.select":
+					ws.selected = cmd.componentId;
+					break;
+				case "component.visibility":
+					cmd.componentIds.forEach((id) => cmd.visible ? ws.hidden.delete(id) : ws.hidden.add(id));
+					break;
+				case "component.showAll":
+					ws.hidden.clear();
+					dispatcher.dispatch({
+						type: "component.isolate",
+						componentId: null
+					}, source);
+					break;
+				case "assembly.explode":
+					ws.exploded = cmd.factor;
+					break;
+				case "assembly.restore":
+					ws.exploded = 0;
+					break;
+				case "lesson.start":
+					ws.lessonActive = true;
+					ws.lessonStep = 0;
+					break;
+				case "lesson.next":
+					ws.lessonStep += 1;
+					break;
+				case "lesson.exit":
+					ws.lessonActive = false;
+					break;
+				case "workspace.switchModel":
+					ws.model = modelRegistry.getModel(cmd.modelId);
+					ws.selected = null;
+					ws.hidden.clear();
+					ws.exploded = 0;
+					ws.lessonActive = false;
+					lifecycle.loadModel(cmd.modelId);
+			}
+			return { status: "executed" };
+		}
+	});
+	const memory = { last: null };
+	const snapshot = (withConversation = true) => getSceneSnapshot(dispatcher, ws.model, withConversation ? { lastDiscussed: memory.last } : {});
+	/** One voice turn, keeping conversation memory like the VoiceDock does. */
+	const say = (transcript, language = "en-IN") => {
+		const r = handleVoiceTurn({
+			transcript,
+			language,
+			dispatcher,
+			model: ws.model,
+			allModels: ALL$3,
+			lastDiscussed: memory.last
+		});
+		if (r.discussedComponentId) memory.last = {
+			modelId: ws.model.id,
+			componentId: r.discussedComponentId
+		};
+		return r;
+	};
+	const tick = (ms) => {
+		clock += ms;
+		controller.update(clock);
+		executor.tick(clock);
+	};
+	return {
+		dispatcher,
+		executor,
+		controller,
+		lifecycle,
+		ws,
+		pointer,
+		anim,
+		steer,
+		memory,
+		snapshot,
+		say,
+		tick
+	};
+}
+var known = (f) => {
+	assert.equal(f.status, "known");
+	return f.value;
+};
+/** Meshes that belong to a component (own or ancestor userData.componentId). */
+function meshesOf(root, componentId) {
+	const out = [];
+	root.traverse((o) => {
+		const m = o;
+		if (!m.isMesh) return;
+		let cur = m;
+		while (cur && !cur.userData?.componentId) cur = cur.parent;
+		if (cur?.userData.componentId === componentId) out.push(m);
+	});
+	return out;
+}
+var emissiveHex = (m) => m.material.emissive.getHex();
+describe("Scene snapshot (Task V3)", () => {
+	it("describes the initial scene", () => {
+		const s = makeWorkspace().snapshot(false);
+		assert.equal(s.version, 1);
+		assert.deepEqual(s.model, {
+			id: "planetary_gearbox",
+			name: gearbox$3.name,
+			domain: "mechanical",
+			category: gearbox$3.category
+		});
+		assert.deepEqual(s.components.map((c) => c.id), gearbox$3.getAllComponentIds());
+		assert.ok(s.components.every((c) => c.visible && c.name && c.role));
+		assert.equal(s.selectedComponentId, null);
+		assert.deepEqual(known(s.pointer), {
+			componentId: null,
+			source: null
+		});
+		assert.equal(known(s.focusedComponentId), null);
+		assert.deepEqual(s.hiddenComponentIds, []);
+		assert.equal(known(s.isolatedComponentId), null);
+		assert.deepEqual(known(s.highlightedComponentIds), []);
+		assert.deepEqual(s.exploded, {
+			supported: true,
+			factor: 0,
+			active: false
+		});
+		assert.equal(known(s.camera).view, "custom");
+		assert.equal(known(s.camera).userSteering, false);
+		assert.deepEqual(known(s.animation.state), {
+			playing: true,
+			speed: 1
+		});
+		assert.deepEqual(s.animation.available.map((a) => a.id), ["gear_train_rotation"]);
+		assert.deepEqual(s.lesson, {
+			available: true,
+			active: false,
+			stepCount: s.lesson.stepCount,
+			currentStep: null,
+			stepTitle: null,
+			stepComponentId: null
+		});
+		assert.equal(s.lastDiscussedComponentId.status, "unavailable", "no conversation context was given");
+		for (const a of [
+			"component.highlight",
+			"assembly.explode",
+			"animation.play",
+			"lesson.start"
+		]) assert.ok(s.availableActions.includes(a), a);
+		assert.ok(!s.availableActions.includes("lesson.next"), "lesson.next needs a running lesson");
+	});
+	it("marks viewer facts unavailable (not empty) when the 3D viewer is not mounted", () => {
+		const d = new SceneCommandDispatcher();
+		d.registerContextProvider("workspace", () => ({
+			modelId: gearbox$3.id,
+			componentIds: new Set(gearbox$3.getAllComponentIds())
+		}));
+		const s = getSceneSnapshot(d, gearbox$3);
+		assert.equal(s.pointer.status, "unavailable");
+		assert.equal(s.isolatedComponentId.status, "unavailable");
+		assert.equal(s.camera.status, "unavailable");
+		assert.equal(s.animation.state.status, "unavailable");
+		assert.ok(!s.availableActions.includes("camera.zoom"));
+	});
+	it("follows selection, pointing, hide/show, isolation, explode, animation and lessons live", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "ui");
+		assert.equal(w.snapshot().selectedComponentId, "ring_gear");
+		w.pointer.componentId = "sun_gear";
+		w.pointer.source = "gesture";
+		assert.deepEqual(known(w.snapshot().pointer), {
+			componentId: "sun_gear",
+			source: "gesture"
+		});
+		w.pointer.componentId = null;
+		w.pointer.source = null;
+		assert.deepEqual(known(w.snapshot().pointer), {
+			componentId: null,
+			source: null
+		});
+		w.dispatcher.dispatch({
+			type: "component.visibility",
+			componentIds: ["planet_carrier"],
+			visible: false
+		}, "ui");
+		let s = w.snapshot();
+		assert.deepEqual(s.hiddenComponentIds, ["planet_carrier"]);
+		assert.equal(s.components.find((c) => c.id === "planet_carrier").visible, false);
+		w.dispatcher.dispatch({
+			type: "component.visibility",
+			componentIds: ["planet_carrier"],
+			visible: true
+		}, "ui");
+		assert.deepEqual(w.snapshot().hiddenComponentIds, []);
+		w.dispatcher.dispatch({
+			type: "component.isolate",
+			componentId: "sun_gear"
+		}, "ui");
+		s = w.snapshot();
+		assert.equal(known(s.isolatedComponentId), "sun_gear");
+		assert.deepEqual(s.components.filter((c) => c.visible).map((c) => c.id), ["sun_gear"]);
+		w.dispatcher.dispatch({
+			type: "component.isolate",
+			componentId: null
+		}, "ui");
+		assert.equal(known(w.snapshot().isolatedComponentId), null);
+		w.dispatcher.dispatch({
+			type: "assembly.explode",
+			factor: .6
+		}, "ui");
+		assert.deepEqual(w.snapshot().exploded, {
+			supported: true,
+			factor: .6,
+			active: true
+		});
+		w.dispatcher.dispatch({ type: "animation.pause" }, "ui");
+		w.dispatcher.dispatch({
+			type: "animation.setSpeed",
+			speed: 2
+		}, "ui");
+		assert.deepEqual(known(w.snapshot().animation.state), {
+			playing: false,
+			speed: 2
+		});
+		w.dispatcher.dispatch({ type: "lesson.start" }, "ui");
+		w.dispatcher.dispatch({ type: "lesson.next" }, "ui");
+		s = w.snapshot();
+		const step = getGuidedLessonForModel(gearbox$3.id).steps[1];
+		assert.deepEqual({
+			...s.lesson,
+			stepCount: 0
+		}, {
+			available: true,
+			active: true,
+			stepCount: 0,
+			currentStep: 1,
+			stepTitle: step.title,
+			stepComponentId: step.componentId
+		});
+		assert.ok(s.availableActions.includes("lesson.next"));
+	});
+	it("tracks the focused part and drops it once the camera is moved elsewhere", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.focus",
+			componentId: "ring_gear"
+		}, "voice");
+		assert.equal(known(w.snapshot().focusedComponentId), "ring_gear");
+		w.dispatcher.dispatch({
+			type: "camera.orbit",
+			yawDeg: 30
+		}, "voice");
+		assert.equal(known(w.snapshot().focusedComponentId), null);
+	});
+	it("names the real camera view and reports \"custom\" after free orbiting", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "camera.view",
+			view: "top"
+		}, "ui");
+		w.tick(1e3);
+		assert.equal(known(w.snapshot().camera).view, "top");
+		w.dispatcher.dispatch({
+			type: "camera.view",
+			view: "back"
+		}, "ui");
+		w.tick(1e3);
+		assert.equal(known(w.snapshot().camera).view, "back");
+		w.dispatcher.dispatch({
+			type: "camera.orbit",
+			yawDeg: 45,
+			pitchDeg: 20
+		}, "ui");
+		w.tick(1e3);
+		assert.equal(known(w.snapshot().camera).view, "custom");
+	});
+	it("clears stale references when the model is switched", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "sun_gear"
+		}, "ui");
+		w.dispatcher.dispatch({
+			type: "component.highlight",
+			componentIds: ["ring_gear"]
+		}, "ui");
+		w.memory.last = {
+			modelId: gearbox$3.id,
+			componentId: "sun_gear"
+		};
+		w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$3.id
+		}, "ui");
+		w.pointer.componentId = "sun_gear";
+		w.pointer.source = "mouse";
+		const s = w.snapshot();
+		assert.equal(s.model.id, bridge$3.id);
+		assert.deepEqual(s.components.map((c) => c.id), bridge$3.getAllComponentIds());
+		assert.equal(s.selectedComponentId, null);
+		assert.deepEqual(known(s.pointer), {
+			componentId: null,
+			source: null
+		});
+		assert.deepEqual(known(s.highlightedComponentIds), []);
+		assert.equal(known(s.lastDiscussedComponentId), null, "gearbox memory is not carried to the bridge");
+		assert.ok(!s.availableActions.includes("animation.play"), "the bridge has no animation");
+	});
+	it("ignores context that belongs to a different model than the one passed in", () => {
+		const s = buildSceneSnapshot(makeWorkspace().dispatcher.getContext(), bridge$3);
+		assert.equal(s.model, null);
+		assert.deepEqual(s.components, []);
+	});
+	it("is plain serialisable data: no Three.js objects, geometry or secrets", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "sun_gear"
+		}, "ui");
+		const snapshot = w.snapshot();
+		const json = JSON.stringify(snapshot);
+		assert.deepEqual(JSON.parse(json), snapshot, "round-trips through JSON (plain data only)");
+		assert.ok(json.length < 8e3, `snapshot is small (${json.length} chars)`);
+		for (const banned of [
+			"geometry",
+			"material",
+			"uuid",
+			"Float32Array",
+			"api_key",
+			"GNANI"
+		]) assert.ok(!json.includes(banned), `contains "${banned}"`);
+	});
+});
+describe("Component reference resolution (Task V3)", () => {
+	const sceneWith = (o) => {
+		return {
+			components: (o.model ?? gearbox$3).getAllComponentIds().map((id) => ({
+				id,
+				name: id,
+				role: null,
+				visible: true,
+				relatedComponentIds: []
+			})),
+			pointer: {
+				status: "known",
+				value: {
+					componentId: o.pointed ?? null,
+					source: o.pointed ? "mouse" : null
+				}
+			},
+			selectedComponentId: o.selected ?? null,
+			lastDiscussedComponentId: {
+				status: "known",
+				value: o.last ?? null
+			}
+		};
+	};
+	it("uses priority explicit > pointed > selected > last discussed", () => {
+		const all = sceneWith({
+			pointed: "sun_gear",
+			selected: "ring_gear",
+			last: "planet_carrier"
+		});
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: ["central_shaft"],
+			contextual: true
+		}, all), {
+			kind: "resolved",
+			componentId: "central_shaft",
+			via: "explicit"
+		});
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: [],
+			contextual: true
+		}, all), {
+			kind: "resolved",
+			componentId: "sun_gear",
+			via: "pointed"
+		});
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: [],
+			contextual: true
+		}, sceneWith({
+			selected: "ring_gear",
+			last: "planet_carrier"
+		})), {
+			kind: "resolved",
+			componentId: "ring_gear",
+			via: "selected"
+		});
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: [],
+			contextual: true
+		}, sceneWith({ last: "planet_carrier" })), {
+			kind: "resolved",
+			componentId: "planet_carrier",
+			via: "lastDiscussed"
+		});
+	});
+	it("asks for clarification instead of guessing", () => {
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: [],
+			contextual: true
+		}, sceneWith({})), { kind: "needsClarification" });
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: [],
+			contextual: false
+		}, sceneWith({ selected: "sun_gear" })), { kind: "needsClarification" });
+	});
+	it("reports several explicit matches as ambiguous", () => {
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: ["planet_gear_1", "planet_gear_2"],
+			contextual: false
+		}, sceneWith({ selected: "sun_gear" })), {
+			kind: "ambiguous",
+			options: ["planet_gear_1", "planet_gear_2"]
+		});
+	});
+	it("never resolves to a component of another model", () => {
+		const onBridge = sceneWith({
+			model: bridge$3,
+			pointed: "sun_gear",
+			selected: "ring_gear",
+			last: "planet_carrier"
+		});
+		assert.deepEqual(resolveComponentReference({
+			explicitIds: ["sun_gear"],
+			contextual: true
+		}, onBridge), { kind: "needsClarification" });
+	});
+});
+describe("Component relationships (Task V3)", () => {
+	it("every relationship of both models is valid and has its inverse", () => {
+		for (const model of [gearbox$3, bridge$3]) {
+			const report = validateModelRelationships(model);
+			assert.deepEqual(report.errors, [], model.id);
+			assert.ok(report.isValid);
+		}
+	});
+	it("gearbox: kinematic links match the model", () => {
+		assert.deepEqual(getRelatedComponentIds(gearbox$3, "sun_gear").sort(), [
+			"central_shaft",
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3"
+		]);
+		assert.deepEqual(getRelatedComponentIds(gearbox$3, "ring_gear").sort(), [
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3"
+		]);
+		assert.deepEqual(getRelatedComponentIds(gearbox$3, "planet_gear_2").sort(), [
+			"planet_carrier",
+			"ring_gear",
+			"sun_gear"
+		]);
+		assert.deepEqual(getRelatedComponentIds(gearbox$3, "central_shaft"), ["sun_gear"]);
+		assert.deepEqual(getRelatedComponentIds(gearbox$3, "sun_gear", ["driven_by"]), ["central_shaft"]);
+		assert.deepEqual(getRelatedComponentIds(gearbox$3, "planet_carrier", ["driven_by"]).sort(), [
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3"
+		]);
+		const types = getComponentRelationships(gearbox$3, "planet_gear_1").map((r) => `${r.relationshipType}:${r.targetComponentId}`).sort();
+		assert.deepEqual(types, [
+			"driven_by:sun_gear",
+			"drives:planet_carrier",
+			"mates_with:ring_gear",
+			"mates_with:sun_gear",
+			"supported_by:planet_carrier"
+		]);
+	});
+	it("gearbox: no invented links (shaft-carrier, planet-planet, ring mounting)", () => {
+		assert.ok(!getRelatedComponentIds(gearbox$3, "central_shaft").includes("planet_carrier"));
+		assert.ok(!getRelatedComponentIds(gearbox$3, "planet_gear_1").includes("planet_gear_2"));
+	});
+	it("bridge: connections and load path match the model metadata", () => {
+		assert.deepEqual(getRelatedComponentIds(bridge$3, "diagonal_members").sort(), [
+			"bottom_chords",
+			"gusset_plates",
+			"top_chords"
+		]);
+		assert.deepEqual(getRelatedComponentIds(bridge$3, "end_portals"), ["support_piers"]);
+		assert.deepEqual(getRelatedComponentIds(bridge$3, "bridge_deck").sort(), ["bottom_chords", "vertical_struts"]);
+		assert.deepEqual(getRelatedComponentIds(bridge$3, "support_piers", ["supports"]), ["bottom_chords"]);
+	});
+	it("returns nothing for unknown or cross-model component IDs", () => {
+		assert.deepEqual(getComponentRelationships(gearbox$3, "no_such_part"), []);
+		assert.deepEqual(getRelatedComponentIds(bridge$3, "sun_gear"), []);
+		assert.deepEqual(getComponentRelationships(gearbox$3, ""), []);
+	});
+	it("walks the relationship graph by depth", () => {
+		assert.deepEqual(getNeighbourhood(gearbox$3, "central_shaft", 1), ["sun_gear"]);
+		const two = getNeighbourhood(gearbox$3, "central_shaft", 2).sort();
+		assert.deepEqual(two, [
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3",
+			"sun_gear"
+		]);
+		assert.ok(!getNeighbourhood(gearbox$3, "central_shaft", 3).includes("central_shaft"));
+	});
+	it("detects invalid targets and components without relationships", () => {
+		const broken = {
+			...gearbox$3,
+			getComponentMetadata: (id) => {
+				const meta = gearbox$3.getComponentMetadata(id);
+				if (!meta) return null;
+				if (id === "sun_gear") return {
+					...meta,
+					relationships: [{
+						targetComponentId: "piston",
+						relationshipType: "drives"
+					}]
+				};
+				return {
+					...meta,
+					relationships: []
+				};
+			}
+		};
+		const report = validateModelRelationships(broken);
+		assert.equal(report.isValid, false);
+		assert.ok(report.errors.some((e) => e.includes("piston")));
+		assert.ok(report.componentsWithoutRelationships.includes("ring_gear"));
+		assert.deepEqual(getRelatedComponentIds(broken, "sun_gear"), [], "invalid targets are never returned");
+	});
+});
+describe("Related-component highlighting (Task V3)", () => {
+	it("highlights several parts together and restores the previous state", () => {
+		const w = makeWorkspace();
+		const raycaster = w.lifecycle.getRaycaster();
+		const root = w.lifecycle.getActiveRuntime().rootGroup;
+		const ring = meshesOf(root, "ring_gear");
+		const sun = meshesOf(root, "sun_gear");
+		const planet = meshesOf(root, "planet_gear_1");
+		assert.ok(ring.length && sun.length && planet.length);
+		const originalRing = ring.map((m) => m.material);
+		raycaster.setSelectionHighlight("sun_gear");
+		const rec = w.dispatcher.dispatch({
+			type: "component.highlight",
+			componentIds: [
+				"ring_gear",
+				"planet_gear_1",
+				"sun_gear"
+			]
+		}, "voice");
+		assert.equal(rec.status, "executed");
+		assert.ok(ring.every((m) => emissiveHex(m) === 2278750), "ring glows green");
+		assert.ok(planet.every((m) => emissiveHex(m) === 2278750), "planet glows green");
+		assert.ok(sun.every((m) => emissiveHex(m) === 16096779), "selection colour wins over the related glow");
+		assert.deepEqual(known(w.snapshot().highlightedComponentIds).sort(), [
+			"planet_gear_1",
+			"ring_gear",
+			"sun_gear"
+		]);
+		w.dispatcher.dispatch({ type: "component.clearHighlight" }, "voice");
+		assert.deepEqual(ring.map((m) => m.material), originalRing, "original materials restored");
+		assert.ok(sun.every((m) => emissiveHex(m) === 16096779), "selection highlight kept");
+		assert.deepEqual(known(w.snapshot().highlightedComponentIds), []);
+	});
+	it("hover and selection still behave as before with the new layer", () => {
+		const w = makeWorkspace();
+		const raycaster = w.lifecycle.getRaycaster();
+		const root = w.lifecycle.getActiveRuntime().rootGroup;
+		const ring = meshesOf(root, "ring_gear");
+		const original = ring.map((m) => m.material);
+		raycaster.setHoverHighlight("ring_gear");
+		assert.ok(ring.every((m) => emissiveHex(m) === 440020));
+		raycaster.setSelectionHighlight("ring_gear");
+		assert.ok(ring.every((m) => emissiveHex(m) === 16096779));
+		raycaster.setSelectionHighlight(null);
+		assert.ok(ring.every((m) => emissiveHex(m) === 440020), "hover glow returns when deselected while hovered");
+		raycaster.setHoverHighlight(null);
+		assert.deepEqual(ring.map((m) => m.material), original);
+	});
+	it("validates highlight commands through V1", () => {
+		const ctx = makeWorkspace().dispatcher.getContext();
+		assert.equal(validateSceneCommand({
+			type: "component.highlight",
+			componentIds: ["piston"]
+		}, ctx).ok, false);
+		assert.equal(validateSceneCommand({
+			type: "component.highlight",
+			componentIds: []
+		}, ctx).ok, false);
+		assert.equal(validateSceneCommand({
+			type: "component.highlight",
+			componentIds: Array(21).fill("sun_gear")
+		}, ctx).ok, false);
+		const ok = validateSceneCommand({
+			type: "component.highlight",
+			componentIds: ["sun_gear", "sun_gear"],
+			extra: 1
+		}, ctx);
+		assert.deepEqual(ok, {
+			ok: true,
+			command: {
+				type: "component.highlight",
+				componentIds: ["sun_gear"]
+			}
+		});
+	});
+});
+describe("Contextual voice commands (Task V3 scenarios)", () => {
+	it("A: pointing — \"What does this do?\" identifies the pointed part, without inventing an answer", () => {
+		const w = makeWorkspace();
+		w.pointer.componentId = "sun_gear";
+		w.pointer.source = "gesture";
+		const r = w.say("What does this do?");
+		assert.deepEqual(r.outcome, {
+			kind: "question",
+			question: "purpose",
+			partId: "sun_gear",
+			via: "pointed"
+		});
+		assert.equal(r.status, "unavailable");
+		assert.match(r.caption, /Sun Gear.*not available yet/);
+		assert.equal(r.records.length, 0, "questions dispatch nothing");
+	});
+	it("A2: \"What is this?\" is answered from model metadata (name and role)", () => {
+		const w = makeWorkspace();
+		w.pointer.componentId = "ring_gear";
+		w.pointer.source = "mouse";
+		const r = w.say("what is this");
+		assert.equal(r.status, "answered");
+		assert.equal(r.caption, `That is the Outer Annulus (Ring Gear): ${gearbox$3.getComponentMetadata("ring_gear").role}.`);
+		assert.equal(w.say("ఇది ఏమిటి", "te-IN").status, "answered");
+		assert.equal(w.say("ये क्या है", "hi-IN").status, "answered");
+	});
+	it("B: selection — \"Separate this part.\" isolates the selected ring gear through the dispatcher", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "ui");
+		const r = w.say("Separate this part.");
+		assert.equal(r.status, "executed");
+		assert.equal(r.outcome.kind === "commands" && r.outcome.via, "selected");
+		assert.ok(r.records.some((rec) => rec.status === "executed" && rec.command.type === "component.isolate"));
+		assert.equal(known(w.snapshot().isolatedComponentId), "ring_gear");
+	});
+	it("C: no context — \"Hide that part.\" asks which part and changes nothing", () => {
+		const w = makeWorkspace();
+		const before = JSON.stringify({
+			...w.snapshot(),
+			capturedAt: 0
+		});
+		const r = w.say("Hide that part.");
+		assert.equal(r.outcome.kind, "needsSelection");
+		assert.equal(r.status, "needsInput");
+		assert.match(r.caption, /Which part do you mean/);
+		assert.equal(r.records.length, 0);
+		assert.equal(JSON.stringify({
+			...w.snapshot(),
+			capturedAt: 0
+		}), before, "scene unchanged");
+		assert.match(w.say("దాన్ని దాచు", "te-IN").caption, /ఏ భాగం/);
+		assert.match(w.say("उसे छुपाओ", "hi-IN").caption, /कौन सा पुर्ज़ा/);
+	});
+	it("D: an explicit name overrides pointing", () => {
+		const w = makeWorkspace();
+		w.pointer.componentId = "sun_gear";
+		w.pointer.source = "gesture";
+		const r = w.say("Explain the ring gear");
+		assert.deepEqual(r.outcome, {
+			kind: "question",
+			question: "explain",
+			partId: "ring_gear",
+			via: "explicit"
+		});
+		const sel = w.say("select the planet carrier");
+		assert.equal(sel.outcome.kind === "commands" && sel.outcome.partId, "planet_carrier");
+	});
+	it("E: after switching to the bridge, a gearbox reference cannot act on the bridge", () => {
+		const w = makeWorkspace();
+		w.say("select the sun gear");
+		assert.equal(w.memory.last?.componentId, "sun_gear");
+		w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$3.id
+		}, "ui");
+		const before = w.dispatcher.getHistory().length;
+		const r = w.say("hide it");
+		assert.equal(r.outcome.kind, "needsSelection");
+		assert.equal(w.dispatcher.getHistory().length, before, "no command dispatched");
+		const g = w.say("hide the sun gear");
+		assert.equal(g.status, "rejected");
+		assert.equal(g.outcome.kind, "unknownPart");
+	});
+	it("remembers the last discussed part for \"it\" in the next turn", () => {
+		const w = makeWorkspace();
+		w.say("what is the ring gear");
+		assert.equal(w.snapshot().selectedComponentId, null, "asking does not select");
+		const r = w.say("hide it");
+		assert.equal(r.outcome.kind === "commands" && r.outcome.via, "lastDiscussed");
+		assert.deepEqual(w.ws.hidden, /* @__PURE__ */ new Set(["ring_gear"]));
+	});
+	it("\"Show me the parts connected to it\" selects the part and highlights its related parts", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "ui");
+		const r = w.say("Show me the parts connected to it.");
+		assert.equal(r.status, "executed");
+		assert.deepEqual(known(w.snapshot().highlightedComponentIds).sort(), [
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3"
+		]);
+		assert.match(r.caption, /connected to .*Ring Gear.*Planet Gear A/);
+		assert.equal(w.say("దీనికి కనెక్ట్ అయిన భాగాలు చూపించు", "te-IN").status, "executed");
+		assert.equal(w.say("इससे जुड़े पुर्ज़े दिखाओ", "hi-IN").status, "executed");
+		assert.equal(w.say("clear the highlight").status, "executed");
+		assert.deepEqual(known(w.snapshot().highlightedComponentIds), []);
+	});
+	it("rejects a relationship request when the model records none for that part", () => {
+		const w = makeWorkspace({
+			...gearbox$3,
+			getComponentMetadata: (id) => {
+				const meta = gearbox$3.getComponentMetadata(id);
+				return meta ? {
+					...meta,
+					relationships: void 0
+				} : null;
+			}
+		});
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "sun_gear"
+		}, "ui");
+		const before = w.dispatcher.getHistory().length;
+		const r = w.say("show the parts connected to it");
+		assert.deepEqual(r.outcome, {
+			kind: "unavailable",
+			intent: "related",
+			reason: "noRelationships",
+			partId: "sun_gear"
+		});
+		assert.equal(r.status, "unavailable");
+		assert.equal(w.dispatcher.getHistory().length, before);
+	});
+	it("\"Put it back\" undoes what the scene shows; \"put it back together\" reassembles", () => {
+		const w = makeWorkspace();
+		assert.equal(w.say("put it back").outcome.kind, "unavailable", "nothing to put back");
+		w.say("isolate the sun gear");
+		assert.equal(known(w.snapshot().isolatedComponentId), "sun_gear");
+		assert.equal(w.say("put it back").status, "executed");
+		assert.equal(known(w.snapshot().isolatedComponentId), null);
+		w.say("hide the ring gear");
+		w.say("put it back");
+		assert.deepEqual(w.ws.hidden, /* @__PURE__ */ new Set());
+		w.say("explode");
+		assert.equal(w.ws.exploded, .75);
+		w.say("put it back together");
+		assert.equal(w.ws.exploded, 0);
+	});
+	it("a question about a part of another model is rejected by name", () => {
+		const r = makeWorkspace().say("what does the piston do");
+		assert.equal(r.outcome.kind, "unknownPart");
+		assert.equal(r.records.length, 0);
+	});
+});
+// tests/teaching.test.ts
+/**
+* Task V4 — teaching plans: frontend validation, the plan player (real dispatcher, viewer
+* executor, camera, model geometry), command-vs-question routing, follow-ups and grounding.
+* The LLM is NOT involved here: plans are hand-written in the backend's output format.
+*/
+var gearbox$2 = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+var bridge$2 = modelRegistry.getModel(WARREN_TRUSS_MODEL_ID);
+var ALL$2 = modelRegistry.getAllModels();
+var sleep$2 = (ms) => new Promise((r) => setTimeout(r, ms));
+var act = (type, extra = {}) => ({
+	type,
+	...extra
+});
+var step = (index, actions, extra = {}) => ({
+	index,
+	kind: "demonstrate",
+	claim: "metadata",
+	narration: `Narration ${index}.`,
+	caption: `Caption ${index}`,
+	targetComponentId: null,
+	actions,
+	waitFor: "narration",
+	holdMs: 0,
+	...extra
+});
+/** A plan in the backend's output format (as /api/teach returns it). */
+function rawPlan(over = {}) {
+	return {
+		schemaVersion: 1,
+		planId: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+		modelId: "planetary_gearbox",
+		targetComponentId: "sun_gear",
+		title: "How power flows through the gearbox",
+		explanation: "The shaft turns the sun gear, which drives the planets; the planets turn the carrier.",
+		cannotAnswer: null,
+		steps: [
+			step(0, [act("component.focus", { componentId: "sun_gear" }), act("component.highlight", { componentIds: ["central_shaft", "sun_gear"] })]),
+			step(1, [act("animation.setSpeed", { speed: .5 }), act("animation.play")], { claim: "visible" }),
+			step(2, [act("component.highlight", { componentIds: [
+				"planet_gear_1",
+				"planet_gear_2",
+				"planet_gear_3"
+			] })]),
+			step(3, [act("animation.pause")], {
+				kind: "explain",
+				claim: "engineering"
+			})
+		],
+		rejectedSteps: [],
+		followUpSuggestions: ["Why is the ring gear fixed?"],
+		...over
+	};
+}
+function validated(w, raw = rawPlan()) {
+	const v = validateTeachingPlan(raw, w.snapshot(false), w.dispatcher.getContext());
+	assert.ok(v.ok, JSON.stringify(v));
+	return v.plan;
+}
+/** Fake narrator: each clip "speaks" for `ms` of unpaused time; logs when narration starts. */
+function fakeNarrator$2(ms = 30, onPlay) {
+	const played = [];
+	const clips = [];
+	return {
+		narrator: { prepare(text) {
+			const rec = {
+				text,
+				paused: false,
+				stopped: false
+			};
+			clips.push(rec);
+			let resolve;
+			const done = new Promise((r) => resolve = r);
+			let timer = null;
+			return {
+				done,
+				play() {
+					played.push(text);
+					onPlay?.(text);
+					let left = ms;
+					timer = setInterval(() => {
+						if (rec.paused || rec.stopped) return;
+						left -= 5;
+						if (left <= 0) {
+							clearInterval(timer);
+							resolve("ended");
+						}
+					}, 5);
+				},
+				pause() {
+					rec.paused = true;
+				},
+				resume() {
+					rec.paused = false;
+				},
+				stop() {
+					rec.stopped = true;
+					if (timer) clearInterval(timer);
+					resolve("stopped");
+				}
+			};
+		} },
+		played,
+		clips
+	};
+}
+/** Workspace + player with the render loop simulated (camera transitions advance in real time). */
+function setup(model = gearbox$2, narratorMs = 30) {
+	const w = makeWorkspace(model);
+	const loop = setInterval(() => w.tick(16), 4);
+	loop.unref?.();
+	const n = fakeNarrator$2(narratorMs);
+	const player = new TeachingPlanPlayer({
+		dispatcher: w.dispatcher,
+		getSnapshot: () => getSceneSnapshot(w.dispatcher, w.ws.model),
+		narrator: n.narrator,
+		pollMs: 4,
+		settleTimeoutMs: 1500
+	});
+	const detach = player.attach();
+	const states = [];
+	player.subscribe((s) => {
+		if (states[states.length - 1] !== s.status) states.push(s.status);
+	});
+	const done = async (timeout = 4e3) => {
+		const t0 = Date.now();
+		while (player.isActive() && Date.now() - t0 < timeout) await sleep$2(5);
+	};
+	const close = () => {
+		clearInterval(loop);
+		detach();
+		player.cancel();
+	};
+	return {
+		w,
+		player,
+		n,
+		states,
+		done,
+		close
+	};
+}
+var aiTypes = (w, from = 0) => w.dispatcher.getHistory().slice(from).filter((r) => r.source === "ai").map((r) => r.command.type);
+describe("Teaching plan validation (Task V4, frontend)", () => {
+	it("accepts a valid plan and returns clean V1 commands", () => {
+		const plan = validated(makeWorkspace());
+		assert.equal(plan.steps.length, 4);
+		assert.deepEqual(plan.steps[0].actions, [{
+			type: "component.focus",
+			componentId: "sun_gear"
+		}, {
+			type: "component.highlight",
+			componentIds: ["central_shaft", "sun_gear"]
+		}]);
+	});
+	it("rejects a plan for another model (stale model id)", () => {
+		const w = makeWorkspace();
+		const v = validateTeachingPlan(rawPlan({ modelId: "warren_truss_bridge" }), w.snapshot(false), w.dispatcher.getContext());
+		assert.deepEqual(v.ok ? "ok" : v.code, "STALE_MODEL");
+	});
+	const badStep = (actions) => rawPlan({ steps: [step(0, [act("component.select", { componentId: "sun_gear" })]), step(1, actions)] });
+	const cases = [
+		[
+			"unknown command",
+			[act("scene.deleteAll")],
+			"ACTION_UNSUPPORTED"
+		],
+		[
+			"hiding parts is not teachable",
+			[act("component.visibility", {
+				componentIds: ["sun_gear"],
+				visible: false
+			})],
+			"ACTION_UNSUPPORTED"
+		],
+		[
+			"model switching is not teachable",
+			[act("workspace.switchModel", { modelId: "warren_truss_bridge" })],
+			"ACTION_UNSUPPORTED"
+		],
+		[
+			"invented component",
+			[act("component.focus", { componentId: "piston" })],
+			"UNKNOWN_COMPONENT"
+		],
+		[
+			"component from the bridge",
+			[act("component.highlight", { componentIds: ["bridge_deck"] })],
+			"UNKNOWN_COMPONENT"
+		],
+		[
+			"bottom view",
+			[act("camera.view", { view: "bottom" })],
+			"INVALID_ARGUMENT"
+		],
+		[
+			"speed out of range",
+			[act("animation.setSpeed", { speed: 9 })],
+			"INVALID_ARGUMENT"
+		],
+		[
+			"too many actions",
+			[
+				act("camera.reset"),
+				act("camera.reset"),
+				act("camera.reset"),
+				act("camera.reset")
+			],
+			"PLAN_INVALID"
+		]
+	];
+	for (const [name, actions, code] of cases) it(`rejects the step, not the plan: ${name}`, () => {
+		const plan = validated(makeWorkspace(), badStep(actions));
+		assert.deepEqual(plan.steps.map((s) => s.index), [0]);
+		assert.equal(plan.rejectedSteps[0].code, code);
+	});
+	it("rejects animation on a model that has none (bridge)", () => {
+		const plan = validated(makeWorkspace(bridge$2), rawPlan({
+			modelId: "warren_truss_bridge",
+			targetComponentId: null,
+			steps: [step(0, [act("component.focus", { componentId: "bridge_deck" })]), step(1, [act("animation.play")])]
+		}));
+		assert.equal(plan.rejectedSteps[0].code, "ACTION_UNAVAILABLE");
+	});
+	it("rejects malformed or oversized plans", () => {
+		const w = makeWorkspace();
+		const check = (raw) => {
+			const v = validateTeachingPlan(raw, w.snapshot(false), w.dispatcher.getContext());
+			return v.ok ? "ok" : v.code;
+		};
+		assert.equal(check(null), "PLAN_INVALID");
+		assert.equal(check("plan"), "PLAN_INVALID");
+		assert.equal(check(rawPlan({ schemaVersion: 2 })), "PLAN_INVALID");
+		assert.equal(check(rawPlan({ steps: [] })), "PLAN_INVALID");
+		assert.equal(check(rawPlan({ steps: Array.from({ length: 9 }, (_, i) => step(i, [])) })), "PLAN_TOO_LONG");
+		assert.equal(check(rawPlan({ title: "" })), "PLAN_INVALID");
+		assert.equal(check(rawPlan({ title: "See https://example.com" })), "PLAN_UNSAFE");
+		assert.equal(check(rawPlan({ targetComponentId: "crankshaft" })), "UNKNOWN_COMPONENT");
+		assert.equal(check(rawPlan({ steps: [step(0, [act("component.focus", { componentId: "piston" })])] })), "PLAN_INVALID");
+	});
+	it("rejects steps with code, markup or links in the narration", () => {
+		const w = makeWorkspace();
+		for (const narration of [
+			"<script>alert(1)<\/script>",
+			"Run eval(x) now",
+			"Use THREE.Mesh to add it",
+			"Visit www.example.com"
+		]) {
+			const plan = validated(w, rawPlan({ steps: [step(0, []), step(1, [], { narration })] }));
+			assert.equal(plan.rejectedSteps[0].code, "PLAN_UNSAFE", narration);
+		}
+	});
+	it("re-validates each step right before it runs", () => {
+		const w = makeWorkspace();
+		const plan = validated(w);
+		assert.equal(validateStepNow(plan.steps[0], plan.modelId, w.dispatcher.getContext()).ok, true);
+		w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$2.id
+		}, "ui");
+		const later = validateStepNow(plan.steps[0], plan.modelId, w.dispatcher.getContext());
+		assert.deepEqual(later.ok ? "ok" : later.code, "STALE_MODEL");
+	});
+});
+describe("Teaching plan player (Task V4)", () => {
+	it("runs steps in order: actions, camera settled, then narration", async () => {
+		const t = setup();
+		const settledAtNarration = [];
+		const n = fakeNarrator$2(20, () => {
+			const cam = t.w.snapshot(false).camera;
+			settledAtNarration.push(cam.status === "known" && cam.value.settled);
+		});
+		const player = new TeachingPlanPlayer({
+			dispatcher: t.w.dispatcher,
+			getSnapshot: () => getSceneSnapshot(t.w.dispatcher, t.w.ws.model),
+			narrator: n.narrator,
+			pollMs: 4
+		});
+		const h0 = t.w.dispatcher.getHistory().length;
+		try {
+			assert.equal(player.start(validated(t.w)), true);
+			const t0 = Date.now();
+			while (player.isActive() && Date.now() - t0 < 4e3) await sleep$2(5);
+			assert.equal(player.getState().status, "finished");
+			assert.deepEqual(n.played, [
+				"Narration 0.",
+				"Narration 1.",
+				"Narration 2.",
+				"Narration 3."
+			]);
+			assert.ok(settledAtNarration.every(Boolean), "narration only starts after the camera settled");
+			assert.deepEqual(aiTypes(t.w, h0).slice(0, 7), [
+				"component.select",
+				"component.focus",
+				"component.highlight",
+				"animation.setSpeed",
+				"animation.play",
+				"component.highlight",
+				"animation.pause"
+			]);
+		} finally {
+			player.cancel();
+			t.close();
+		}
+	});
+	it("restores what the plan changed when it finishes (selection kept, camera untouched)", async () => {
+		const t = setup();
+		t.w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "ui");
+		t.player.start(validated(t.w, rawPlan({ steps: [step(0, [
+			act("component.select", { componentId: "sun_gear" }),
+			act("component.highlight", { componentIds: ["planet_gear_1"] }),
+			act("component.isolate", { componentId: "sun_gear" })
+		]), step(1, [act("assembly.explode", { factor: .5 }), act("animation.setSpeed", { speed: 2 })])] })));
+		await t.done();
+		const s = t.w.snapshot(false);
+		assert.deepEqual(s.highlightedComponentIds, {
+			status: "known",
+			value: []
+		});
+		assert.deepEqual(s.isolatedComponentId, {
+			status: "known",
+			value: null
+		});
+		assert.equal(s.exploded.factor, 0);
+		assert.deepEqual(t.w.anim, {
+			playing: true,
+			speed: 1
+		});
+		assert.equal(s.selectedComponentId, "sun_gear", "topic stays selected for follow-ups");
+		t.close();
+	});
+	it("pause stops progress and the narration; resume continues", async () => {
+		const t = setup(gearbox$2, 60);
+		t.player.start(validated(t.w));
+		while (t.player.getState().phase !== "narrating") await sleep$2(3);
+		t.player.pause();
+		const pos = t.player.getState().stepPosition;
+		await sleep$2(150);
+		assert.equal(t.player.getState().status, "paused");
+		assert.equal(t.player.getState().stepPosition, pos, "no progress while paused");
+		assert.ok(t.n.clips.some((c) => c.paused), "narration paused");
+		t.player.resume();
+		await t.done();
+		assert.equal(t.player.getState().status, "finished");
+		t.close();
+	});
+	it("cancel stops speech, dispatches nothing more and restores the scene (incl. selection)", async () => {
+		const t = setup(gearbox$2, 80);
+		t.w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "ui");
+		t.player.start(validated(t.w, rawPlan({ steps: [step(0, [
+			act("component.select", { componentId: "sun_gear" }),
+			act("component.highlight", { componentIds: ["planet_gear_1"] }),
+			act("component.isolate", { componentId: "sun_gear" })
+		]), step(1, [act("animation.pause")])] })));
+		while (t.player.getState().phase !== "narrating") await sleep$2(3);
+		t.player.cancel();
+		const h = t.w.dispatcher.getHistory().length;
+		await sleep$2(150);
+		assert.equal(t.player.getState().status, "cancelled");
+		assert.ok(t.n.clips[0].stopped, "speech stopped");
+		assert.equal(t.w.dispatcher.getHistory().length, h, "nothing dispatched after cancel");
+		const s = t.w.snapshot(false);
+		assert.deepEqual(s.highlightedComponentIds, {
+			status: "known",
+			value: []
+		});
+		assert.deepEqual(s.isolatedComponentId, {
+			status: "known",
+			value: null
+		});
+		assert.equal(s.selectedComponentId, "ring_gear");
+		assert.equal(t.w.anim.playing, true, "step 1 (pause) never ran");
+		t.close();
+	});
+	it("manual takeover: a command from the user pauses the plan", async () => {
+		const t = setup(gearbox$2, 80);
+		t.player.start(validated(t.w));
+		while (t.player.getState().phase !== "narrating") await sleep$2(3);
+		t.w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "mouse");
+		assert.equal(t.player.getState().status, "paused");
+		assert.match(t.player.getState().message ?? "", /changed the scene/);
+		t.close();
+	});
+	it("manual takeover: steering the camera by hand pauses the plan", async () => {
+		const t = setup(gearbox$2, 120);
+		t.player.start(validated(t.w));
+		while (t.player.getState().phase !== "narrating") await sleep$2(3);
+		t.w.steer.on = true;
+		await sleep$2(40);
+		assert.equal(t.player.getState().status, "paused");
+		assert.match(t.player.getState().message ?? "", /moved the view/);
+		t.w.steer.on = false;
+		t.close();
+	});
+	it("a model switch during playback cancels without touching the new model", async () => {
+		const t = setup(gearbox$2, 80);
+		t.player.start(validated(t.w));
+		while (t.player.getState().phase !== "narrating") await sleep$2(3);
+		t.w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$2.id
+		}, "ui");
+		const h = t.w.dispatcher.getHistory().length;
+		await sleep$2(80);
+		assert.equal(t.player.getState().status, "cancelled");
+		assert.match(t.player.getState().message ?? "", /model changed/);
+		assert.equal(aiTypes(t.w, h).length, 0, "no command dispatched on the bridge");
+		t.close();
+	});
+	it("refuses to start a plan for a model that is no longer loaded", () => {
+		const t = setup();
+		const plan = validated(t.w);
+		t.w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$2.id
+		}, "ui");
+		assert.equal(t.player.start(plan), false);
+		assert.equal(t.player.getState().status, "failed");
+		t.close();
+	});
+	it("a step that no longer validates is skipped without changing the scene", async () => {
+		const t = setup();
+		const plan = validated(t.w);
+		plan.steps[1] = {
+			...plan.steps[1],
+			actions: [{
+				type: "component.focus",
+				componentId: "piston"
+			}]
+		};
+		const h0 = t.w.dispatcher.getHistory().length;
+		t.player.start(plan);
+		await t.done();
+		assert.equal(t.player.getState().status, "finished");
+		assert.deepEqual(t.player.getState().runtimeRejected.map((r) => [r.index, r.code]), [[1, "UNKNOWN_COMPONENT"]]);
+		assert.ok(!t.w.dispatcher.getHistory().slice(h0).some((r) => JSON.stringify(r.command).includes("piston")));
+		assert.ok(!t.n.played.includes("Narration 1."), "skipped step is not narrated");
+		t.close();
+	});
+	it("never runs two plans at once", async () => {
+		const t = setup(gearbox$2, 60);
+		assert.equal(t.player.start(validated(t.w)), true);
+		assert.equal(t.player.start(validated(t.w)), false);
+		t.close();
+	});
+	it("waits for Continue on a \"user\" step", async () => {
+		const t = setup();
+		t.player.start(validated(t.w, rawPlan({ steps: [step(0, [], { waitFor: "user" }), step(1, [])] })));
+		while (t.player.getState().status !== "waitingForUser") await sleep$2(3);
+		await sleep$2(60);
+		assert.equal(t.player.getState().stepPosition, 0);
+		t.player.continue();
+		await t.done();
+		assert.deepEqual(t.n.played, ["Narration 0.", "Narration 1."]);
+		t.close();
+	});
+	it("commands are dispatched through V1 with source \"ai\" and validated again there", async () => {
+		const t = setup();
+		t.player.start(validated(t.w));
+		await t.done();
+		const ai = t.w.dispatcher.getHistory().filter((r) => r.source === "ai");
+		assert.ok(ai.length > 0 && ai.every((r) => r.status === "executed"));
+		t.close();
+	});
+});
+describe("Command vs teaching-question routing (Task V4)", () => {
+	const turn = (w, transcript, language = "en-IN") => {
+		const r = handleVoiceTurn({
+			transcript,
+			language,
+			dispatcher: w.dispatcher,
+			model: w.ws.model,
+			allModels: ALL$2,
+			lastDiscussed: w.memory.last,
+			teachingAvailable: true
+		});
+		if (r.discussedComponentId) w.memory.last = {
+			modelId: w.ws.model.id,
+			componentId: r.discussedComponentId
+		};
+		return r;
+	};
+	it("simple commands stay on the deterministic path (no LLM)", () => {
+		const w = makeWorkspace();
+		for (const t of [
+			"zoom in",
+			"show the back",
+			"hide the sun gear",
+			"rotate left",
+			"show me the parts connected to the ring gear",
+			"put it back"
+		]) {
+			const r = turn(w, t);
+			assert.notEqual(r.status, "teach", t);
+			assert.equal(r.teach, void 0, t);
+		}
+	});
+	it("\"what is this?\" is still answered locally from metadata", () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "sun_gear"
+		}, "ui");
+		assert.equal(turn(w, "what is this").status, "answered");
+	});
+	for (const [q, target, type] of [
+		[
+			"Explain how this gearbox works.",
+			null,
+			"explain"
+		],
+		[
+			"Show me how power flows through the gearbox.",
+			null,
+			"howWorks"
+		],
+		[
+			"What happens when the sun gear rotates?",
+			"sun_gear",
+			"howWorks"
+		],
+		[
+			"Why do we need the planet carrier?",
+			"planet_carrier",
+			"purpose"
+		],
+		[
+			"What would happen if this component failed?",
+			"ring_gear",
+			"failure"
+		],
+		[
+			"గేర్‌బాక్స్ ఎలా పనిచేస్తుంది?",
+			null,
+			"howWorks"
+		],
+		[
+			"प्लैनेट कैरियर की ज़रूरत क्यों है?",
+			"planet_carrier",
+			"purpose"
+		]
+	]) it(`teaching question: "${q}"`, () => {
+		const w = makeWorkspace();
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "ui");
+		const lang = /[ఀ-౿]/.test(q) ? "te-IN" : /[ऀ-ॿ]/.test(q) ? "hi-IN" : "en-IN";
+		const r = turn(w, q, lang);
+		assert.equal(r.status, "teach", JSON.stringify(r.outcome));
+		assert.deepEqual(r.teach, {
+			question: q,
+			questionType: type,
+			targetComponentId: target
+		});
+		assert.equal(r.records.length, 0, "nothing executed before a plan is validated");
+	});
+	it("bridge: load-transfer questions are whole-model, path questions name several parts", () => {
+		const w = makeWorkspace(bridge$2);
+		const a = turn(w, "Explain the bridge's load-transfer mechanism.");
+		assert.equal(a.status, "teach");
+		assert.equal(a.teach.targetComponentId, null);
+		const b = turn(w, "Show me how forces travel from the deck to the piers.");
+		assert.equal(b.status, "teach");
+		assert.deepEqual(b.outcome.kind === "question" && b.outcome.mentionedIds.sort(), ["bridge_deck", "support_piers"]);
+	});
+	it("one name shared by several parts is ambiguous, not a path", () => {
+		const w = makeWorkspace();
+		const r = turn(w, "explain the planet gear");
+		assert.equal(r.outcome.kind, "ambiguous");
+		assert.equal(r.status, "needsInput");
+	});
+	it("teaching questions about parts of other models are rejected locally", () => {
+		const w = makeWorkspace();
+		const r = turn(w, "why does the piston need oil");
+		assert.equal(r.outcome.kind, "unknownPart");
+		assert.equal(r.teach, void 0);
+	});
+	it("without a configured teaching model, questions keep the V3 \"not available yet\" reply", () => {
+		const r = handleVoiceTurn({
+			transcript: "why do we need the planet carrier",
+			language: "en-IN",
+			dispatcher: makeWorkspace().dispatcher,
+			model: gearbox$2,
+			allModels: ALL$2
+		});
+		assert.equal(r.status, "unavailable");
+		assert.match(r.caption, /not available yet/);
+	});
+});
+describe("Teaching follow-ups, context and grounding (Task V4)", () => {
+	const turn = (w, transcript) => {
+		const r = handleVoiceTurn({
+			transcript,
+			language: "en-IN",
+			dispatcher: w.dispatcher,
+			model: w.ws.model,
+			allModels: ALL$2,
+			lastDiscussed: w.memory.last,
+			teachingAvailable: true
+		});
+		if (r.discussedComponentId) w.memory.last = {
+			modelId: w.ws.model.id,
+			componentId: r.discussedComponentId
+		};
+		return r;
+	};
+	it("follow-up pronouns keep the discussed part; a model switch forgets it", () => {
+		const w = makeWorkspace();
+		assert.equal(turn(w, "Explain the planet carrier.").teach.targetComponentId, "planet_carrier");
+		const why = turn(w, "Why is it needed?");
+		assert.deepEqual([why.teach.targetComponentId, why.teach.questionType], ["planet_carrier", "purpose"]);
+		const broke = turn(w, "What would happen if it broke?");
+		assert.deepEqual([broke.teach.targetComponentId, broke.teach.questionType], ["planet_carrier", "failure"]);
+		w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$2.id
+		}, "ui");
+		const after = turn(w, "Why is it needed?");
+		assert.equal(after.outcome.kind, "needsSelection");
+		assert.equal(after.teach, void 0);
+	});
+	it("a pointed part is used for \"this\"; an explicit name overrides it", () => {
+		const w = makeWorkspace();
+		w.pointer.componentId = "sun_gear";
+		w.pointer.source = "gesture";
+		assert.equal(turn(w, "why is this part needed").teach.targetComponentId, "sun_gear");
+		assert.equal(turn(w, "why do we need the ring gear").teach.targetComponentId, "ring_gear");
+	});
+	it("missing context asks the user instead of guessing", () => {
+		const w = makeWorkspace();
+		const r = turn(w, "why is this needed");
+		assert.equal(r.outcome.kind, "needsSelection");
+		assert.equal(r.teach, void 0);
+	});
+	it("fact pack: grounded in model data, minimal, and states what is not simulated", () => {
+		const pack = buildFactPack(gearbox$2, makeWorkspace().snapshot(false), "planet_carrier");
+		assert.equal(pack.modelId, "planetary_gearbox");
+		const carrier = pack.components.find((c) => c.id === "planet_carrier");
+		assert.ok(carrier.notes.length > 0 && carrier.description.length > 0, "target in full");
+		assert.deepEqual(carrier.relationships.map((r) => `${r.type}:${r.target}`).sort(), [
+			"driven_by:planet_gear_1",
+			"driven_by:planet_gear_2",
+			"driven_by:planet_gear_3",
+			"supports:planet_gear_1",
+			"supports:planet_gear_2",
+			"supports:planet_gear_3"
+		]);
+		const shaft = pack.components.find((c) => c.id === "central_shaft");
+		assert.equal(shaft.description, "", "parts outside the question are sent briefly");
+		assert.deepEqual(pack.animations.map((a) => a.id), ["gear_train_rotation"]);
+		assert.ok(pack.limits.some((l) => /not simulate forces, torque/.test(l)));
+		assert.ok(pack.allowedActions.every((a) => ![
+			"component.visibility",
+			"workspace.switchModel",
+			"workspace.goHome"
+		].includes(a)));
+		const json = JSON.stringify(pack);
+		assert.ok(json.length < 9e3, `pack size ${json.length}`);
+		for (const banned of [
+			"geometry",
+			"uuid",
+			"GNANI",
+			"api_key",
+			"LLM_API_KEY"
+		]) assert.ok(!json.includes(banned), banned);
+	});
+	it("fact pack: the bridge declares no structural analysis and no animation", () => {
+		const pack = buildFactPack(bridge$2, makeWorkspace(bridge$2).snapshot(false), null);
+		assert.deepEqual(pack.animations, []);
+		assert.ok(modelLimits(bridge$2).some((l) => /No structural analysis/.test(l)));
+		assert.ok(!pack.allowedActions.includes("animation.play"));
+		const deck = pack.components.find((c) => c.id === "bridge_deck");
+		assert.deepEqual(deck.relationships.map((r) => r.target).sort(), ["bottom_chords", "vertical_struts"]);
+		assert.ok(pack.components.every((c) => c.relationships.every((r) => bridge$2.getAllComponentIds().includes(r.target))));
+	});
+});
+describe("Teaching client (Task V4)", () => {
+	const body = {
+		question: "q",
+		language: "en-IN",
+		targetComponentId: null,
+		facts: {},
+		history: []
+	};
+	const respond = (status, data) => (async () => new Response(JSON.stringify(data), { status }));
+	it("maps server errors to stable codes and readable messages", async () => {
+		for (const [code, status] of [
+			["LLM_NOT_CONFIGURED", 503],
+			["LLM_TIMEOUT", 504],
+			["PLAN_INVALID", 422],
+			["LLM_RATE_LIMIT", 429]
+		]) await assert.rejects(requestTeachingPlan(body, void 0, respond(status, { error: {
+			code,
+			message: "x"
+		} })), (e) => e.code === code && e.message.length > 5);
+	});
+	it("reports a down backend and cancellation", async () => {
+		await assert.rejects(requestTeachingPlan(body, void 0, (async () => {
+			throw new TypeError("fetch failed");
+		})), (e) => e.code === "BACKEND_UNAVAILABLE");
+		const c = new AbortController();
+		c.abort();
+		await assert.rejects(requestTeachingPlan(body, c.signal, (async () => {
+			throw new DOMException("aborted", "AbortError");
+		})), (e) => e.code === "CANCELLED");
+	});
+	it("returns the plan on success", async () => {
+		assert.deepEqual(await requestTeachingPlan(body, void 0, respond(200, { plan: { a: 1 } })), { a: 1 });
+	});
+});
+// tests/voiceV5.test.ts
+/**
+* Task V5 — voice reliability, explanations and interruption handling.
+*
+* Transcripts marked "Prisma" are the real Gnani Prisma output for Timbre-spoken requests
+* (27 Oct 2026), including its mis-hearings. The LLM is SIMULATED here (controllable promises);
+* the dispatcher, viewer executor, camera, model geometry, plan validation and player are real.
+*/
+var gearbox$1 = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+var bridge$1 = modelRegistry.getModel(WARREN_TRUSS_MODEL_ID);
+var ALL$1 = modelRegistry.getAllModels();
+var sleep$1 = (ms) => new Promise((r) => setTimeout(r, ms));
+function turn$1(w, transcript, language = "en-IN", extra = {}) {
+	const r = handleVoiceTurn({
+		transcript,
+		language,
+		dispatcher: w.dispatcher,
+		model: w.ws.model,
+		allModels: ALL$1,
+		lastDiscussed: w.memory.last,
+		teachingAvailable: true,
+		...extra
+	});
+	if (r.discussedComponentId) w.memory.last = {
+		modelId: w.ws.model.id,
+		componentId: r.discussedComponentId
+	};
+	return r;
+}
+function selected$1(component, model = gearbox$1) {
+	const w = makeWorkspace(model);
+	w.dispatcher.dispatch({
+		type: "component.select",
+		componentId: component
+	}, "ui");
+	return w;
+}
+/** Narrator that "speaks" for `ms` of unpaused time; records starts and stops. */
+function fakeNarrator$1(ms = 40) {
+	const played = [];
+	const clips = [];
+	return {
+		narrator: { prepare(text) {
+			const rec = {
+				text,
+				stopped: false,
+				paused: false
+			};
+			clips.push(rec);
+			let resolve;
+			const done = new Promise((r) => resolve = r);
+			let timer = null;
+			return {
+				done,
+				play() {
+					played.push(text);
+					let left = ms;
+					timer = setInterval(() => {
+						if (rec.paused || rec.stopped) return;
+						left -= 5;
+						if (left <= 0) {
+							clearInterval(timer);
+							resolve("ended");
+						}
+					}, 5);
+					timer.unref?.();
+				},
+				pause() {
+					rec.paused = true;
+				},
+				resume() {
+					rec.paused = false;
+				},
+				stop() {
+					rec.stopped = true;
+					if (timer) clearInterval(timer);
+					resolve("stopped");
+				}
+			};
+		} },
+		played,
+		clips
+	};
+}
+/** A teaching plan as the backend returns it, for whichever part the request targeted. */
+function llmPlan(target, model = gearbox$1, nSteps = 3) {
+	return {
+		schemaVersion: 1,
+		planId: Array.from({ length: 32 }, (_, i) => ((i * 7 + (target?.length ?? 3)) % 16).toString(16)).join(""),
+		modelId: model.id,
+		targetComponentId: target,
+		title: `About ${target ?? model.name}`,
+		explanation: "Grounded explanation.",
+		cannotAnswer: null,
+		steps: Array.from({ length: nSteps }, (_, i) => ({
+			index: i,
+			kind: "demonstrate",
+			claim: "metadata",
+			narration: `${target ?? "model"} step ${i}.`,
+			caption: `Step ${i}`,
+			targetComponentId: target,
+			actions: target ? [{
+				type: "component.focus",
+				componentId: target
+			}] : [],
+			waitFor: "narration",
+			holdMs: 0
+		})),
+		rejectedSteps: [],
+		followUpSuggestions: []
+	};
+}
+/** Controller + real player with a simulated LLM whose replies the test resolves. */
+function lifecycle(w, narratorMs = 40) {
+	const loop = setInterval(() => w.tick(16), 4);
+	loop.unref?.();
+	const n = fakeNarrator$1(narratorMs);
+	const player = new TeachingPlanPlayer({
+		dispatcher: w.dispatcher,
+		getSnapshot: () => getSceneSnapshot(w.dispatcher, w.ws.model),
+		narrator: n.narrator,
+		pollMs: 4,
+		settleTimeoutMs: 1500
+	});
+	const detach = player.attach();
+	const requests = [];
+	const started = [];
+	const controller = new TeachingController({
+		dispatcher: w.dispatcher,
+		player,
+		getModel: () => w.ws.model,
+		getLanguage: () => "en-IN",
+		requestPlan: (body, signal) => new Promise((resolve, reject) => requests.push({
+			body,
+			signal,
+			resolve,
+			reject
+		})),
+		onPlanStarted: (p) => started.push(`${p.source}:${p.targetComponentId}`)
+	});
+	const close = () => {
+		controller.cancel();
+		detach();
+		clearInterval(loop);
+	};
+	const until = async (cond, ms = 3e3) => {
+		const t0 = Date.now();
+		while (!cond() && Date.now() - t0 < ms) await sleep$1(5);
+		return cond();
+	};
+	return {
+		player,
+		controller,
+		requests,
+		started,
+		n,
+		close,
+		until
+	};
+}
+var aiSince = (w, from) => w.dispatcher.getHistory().slice(from).filter((r) => r.source === "ai").map((r) => JSON.stringify(r.command));
+describe("V5 intent routing: selected part + natural requests (EN / TE / HI, code-mixed)", () => {
+	for (const [language, transcript, type] of [
+		[
+			"te-IN",
+			"చూడు ఇప్పుడు నేను ఈ పార్ట్ ని సెలెక్ట్ చేశాను దాన్ని ఎక్స్ప్లెయిన్ చేయ",
+			"explain"
+		],
+		[
+			"te-IN",
+			"చూడు ఇప్పుడు నేను ఈ పార్టీని సెలెక్ట్ చేశాను దాన్ని ఎక్స్ప్లెయిన్ చెయ్య",
+			"explain"
+		],
+		[
+			"te-IN",
+			"ఈ పాట ఎందుకు అవసరం",
+			"purpose"
+		],
+		[
+			"te-IN",
+			"ఇది ఎలా పని చేస్తుంది",
+			"howWorks"
+		],
+		[
+			"hi-IN",
+			"देखो मैंने यह पार्ट सेलेक्ट किया है इसे एक्सप्लेन करो।",
+			"explain"
+		],
+		[
+			"hi-IN",
+			"इसकी जरूरत क्यों है",
+			"purpose"
+		],
+		[
+			"en-IN",
+			"Explain this part. Why is it used, and how does it work?",
+			"explain"
+		],
+		[
+			"en-IN",
+			"Why do we need this?",
+			"purpose"
+		],
+		[
+			"en-IN",
+			"How does it work?",
+			"howWorks"
+		],
+		[
+			"en-IN",
+			"What happens if it fails?",
+			"failure"
+		],
+		[
+			"en-IN",
+			"Show me how it interacts with the other gears.",
+			"howWorks"
+		],
+		[
+			"en-IN",
+			"What is its role in the entire gearbox?",
+			"purpose"
+		]
+	]) it(`${language}: "${transcript}" -> explain the selected sun gear (${type})`, () => {
+		const r = turn$1(selected$1("sun_gear"), transcript, language);
+		assert.equal(r.status, "teach", JSON.stringify(r.outcome));
+		assert.equal(r.teach.targetComponentId, "sun_gear");
+		assert.equal(r.teach.questionType, type);
+		assert.equal(r.records.length, 0, "the selection is not re-dispatched");
+	});
+	it("\"Explain it in Telugu\" keeps the part and asks for Telugu", () => {
+		const r = turn$1(selected$1("sun_gear"), "Explain it in Telugu");
+		assert.deepEqual([r.teach.targetComponentId, r.teach.language], ["sun_gear", "te-IN"]);
+	});
+	it("\"Explain how this gearbox works\" is about the whole model even with a part selected", () => {
+		const r = turn$1(selected$1("sun_gear"), "Explain how this gearbox works");
+		assert.equal(r.status, "teach");
+		assert.equal(r.teach.targetComponentId, null);
+	});
+	it("an explicit name overrides the selection (\"No, not that part. Explain the planet carrier instead.\")", () => {
+		const r = turn$1(selected$1("sun_gear"), "no not that part explain the planet carrier instead");
+		assert.equal(r.teach.targetComponentId, "planet_carrier");
+	});
+	it("a follow-up keeps the discussed part; a model switch clears it", () => {
+		const w = makeWorkspace();
+		assert.equal(turn$1(w, "Explain the planet carrier.").teach.targetComponentId, "planet_carrier");
+		assert.equal(turn$1(w, "Why is it needed?").teach.targetComponentId, "planet_carrier");
+		assert.equal(turn$1(w, "అది ఎందుకు అవసరం", "te-IN").teach.targetComponentId, "planet_carrier", "follow-up in another language");
+		w.dispatcher.dispatch({
+			type: "workspace.switchModel",
+			modelId: bridge$1.id
+		}, "ui");
+		assert.equal(turn$1(w, "Why is it needed?").outcome.kind, "needsSelection");
+	});
+	it("missing context gets a spoken clarification, never an arbitrary part", () => {
+		for (const [t, lang] of [["Explain this part.", "en-IN"], ["దాన్ని ఎక్స్ప్లెయిన్ చెయ్యి", "te-IN"]]) {
+			const r = turn$1(makeWorkspace(), t, lang);
+			assert.equal(r.status, "needsInput");
+			assert.equal(r.speak, true);
+			assert.equal(r.teach, void 0);
+		}
+	});
+	it("a part from another model is named, not substituted", () => {
+		const r = turn$1(selected$1("sun_gear"), "explain the piston");
+		assert.equal(r.outcome.kind, "unknownPart");
+		assert.equal(r.teach, void 0);
+	});
+	it("an empty transcript asks to repeat and starts nothing", () => {
+		let superseded = 0;
+		const r = turn$1(selected$1("sun_gear"), "   ", "te-IN", { onSupersede: () => superseded++ });
+		assert.equal(r.status, "needsInput");
+		assert.match(r.caption, /ఇంకోసారి/);
+		assert.equal(superseded, 0);
+	});
+});
+describe("V5 request classification during an explanation", () => {
+	it("new requests supersede; clarifications, unknown speech and controls do not", () => {
+		const w = selected$1("ring_gear");
+		const count = (t, active = true) => {
+			let n = 0;
+			turn$1(w, t, "en-IN", {
+				teachingActive: active,
+				onSupersede: () => n++
+			});
+			return n;
+		};
+		assert.equal(count("Actually, just show me where it is."), 1, "visual command");
+		assert.equal(count("Explain the planet carrier"), 1, "new teaching question");
+		assert.equal(count("Why is it needed?"), 1, "follow-up question (new plan, same part)");
+		assert.equal(count("make me a sandwich"), 0, "unrecognised speech");
+		assert.equal(count("wait"), 0, "control");
+		assert.equal(count("explain the piston"), 0, "unknown part keeps the explanation");
+	});
+	it("\"wait / continue / stop\" control the explanation only while one is active", () => {
+		const w = selected$1("sun_gear");
+		const c = (t, lang = "en-IN") => turn$1(w, t, lang, { teachingActive: true });
+		assert.deepEqual([
+			c("wait").control,
+			c("continue").control,
+			c("stop").control
+		], [
+			"pause",
+			"resume",
+			"stop"
+		]);
+		assert.deepEqual([
+			c("ఆగు", "te-IN").control,
+			c("కొనసాగించు", "te-IN").control,
+			c("బస్ చాలు", "te-IN").control
+		], [
+			"pause",
+			"resume",
+			"stop"
+		]);
+		assert.deepEqual([
+			c("रुको", "hi-IN").control,
+			c("जारी रखो", "hi-IN").control,
+			c("बस", "hi-IN").control
+		], [
+			"pause",
+			"resume",
+			"stop"
+		]);
+		const idle = turn$1(w, "stop", "en-IN", { teachingActive: false });
+		assert.equal(idle.outcome.kind, "commands", "without an explanation, \"stop\" keeps its V2 meaning (pause the animation)");
+		const named = c("stop and explain the ring gear");
+		assert.equal(named.status, "teach", "a part name or question makes it a new request, not a control");
+	});
+	it("\"Actually, just show me where it is\" targets the part being explained", () => {
+		const w = makeWorkspace();
+		w.memory.last = {
+			modelId: gearbox$1.id,
+			componentId: "ring_gear"
+		};
+		const r = turn$1(w, "Actually, just show me where it is.", "en-IN", { teachingActive: true });
+		assert.equal(r.status, "executed");
+		assert.deepEqual(r.records.map((x) => x.command.componentId), ["ring_gear", "ring_gear"]);
+	});
+});
+describe("V5 interruption lifecycle (simulated LLM, real player and dispatcher)", () => {
+	it("a new component request stops the old narration and plays the new plan", async () => {
+		const w = selected$1("sun_gear");
+		const L = lifecycle(w, 150);
+		try {
+			L.controller.ask({
+				question: "Explain the sun gear",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			L.requests[0].resolve(llmPlan("sun_gear"));
+			assert.ok(await L.until(() => L.player.getState().phase === "narrating"));
+			const sunClip = L.n.clips.find((c) => c.text.startsWith("sun_gear"));
+			L.controller.ask({
+				question: "Explain the planet carrier instead",
+				questionType: "explain",
+				targetComponentId: "planet_carrier"
+			});
+			assert.ok(sunClip.stopped, "old narration stopped immediately");
+			assert.equal(L.player.getState().status, "cancelled");
+			const h = w.dispatcher.getHistory().length;
+			L.requests[1].resolve(llmPlan("planet_carrier"));
+			assert.ok(await L.until(() => L.player.getState().plan?.targetComponentId === "planet_carrier" && L.player.getState().phase === "narrating"));
+			assert.ok(aiSince(w, h).every((c) => !c.includes("sun_gear")), "no stale sun-gear action after the interruption");
+			assert.deepEqual(L.started, ["llm:sun_gear", "llm:planet_carrier"]);
+		} finally {
+			L.close();
+		}
+	});
+	it("a visual command supersedes the plan: no further plan actions, the command runs", async () => {
+		const w = selected$1("ring_gear");
+		const L = lifecycle(w, 150);
+		try {
+			L.controller.ask({
+				question: "Explain the ring gear",
+				questionType: "explain",
+				targetComponentId: "ring_gear"
+			});
+			L.requests[0].resolve(llmPlan("ring_gear", gearbox$1, 4));
+			assert.ok(await L.until(() => L.player.getState().phase === "narrating"));
+			const h = w.dispatcher.getHistory().length;
+			const r = turn$1(w, "Actually, just show me where it is.", "en-IN", {
+				teachingActive: L.controller.isActive(),
+				onSupersede: () => L.controller.supersede()
+			});
+			assert.equal(r.status, "executed");
+			assert.equal(L.player.getState().status, "cancelled");
+			await sleep$1(300);
+			const after = w.dispatcher.getHistory().slice(h);
+			assert.ok(after.some((x) => x.source === "voice" && x.command.type === "component.focus"));
+			assert.ok(!after.some((x) => x.source === "ai" && x.command.type === "component.focus"), "no stale plan step ran");
+		} finally {
+			L.close();
+		}
+	});
+	it("a late LLM reply for a superseded question is never played", async () => {
+		const L = lifecycle(selected$1("sun_gear"));
+		try {
+			const first = L.controller.ask({
+				question: "Explain the sun gear",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			const second = L.controller.ask({
+				question: "Explain the ring gear",
+				questionType: "explain",
+				targetComponentId: "ring_gear"
+			});
+			assert.ok(L.requests[0].signal.aborted, "the superseded request was aborted");
+			L.requests[1].resolve(llmPlan("ring_gear"));
+			assert.equal(await second, "started");
+			L.requests[0].resolve(llmPlan("sun_gear"));
+			assert.equal(await first, "stale");
+			assert.equal(L.player.getState().plan?.targetComponentId, "ring_gear");
+			assert.deepEqual(L.started, ["llm:ring_gear"]);
+		} finally {
+			L.close();
+		}
+	});
+	it("a reply that arrives after Stop does not restart anything", async () => {
+		const L = lifecycle(selected$1("sun_gear"));
+		try {
+			const p = L.controller.ask({
+				question: "Explain this",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			L.controller.cancel();
+			L.requests[0].resolve(llmPlan("sun_gear"));
+			assert.equal(await p, "stale");
+			assert.equal(L.player.isActive(), false);
+			assert.deepEqual(L.started, []);
+		} finally {
+			L.close();
+		}
+	});
+	it("a model switch while the reply is pending discards it; nothing touches the bridge", async () => {
+		const w = selected$1("sun_gear");
+		const L = lifecycle(w);
+		try {
+			const p = L.controller.ask({
+				question: "Explain this",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			w.dispatcher.dispatch({
+				type: "workspace.switchModel",
+				modelId: bridge$1.id
+			}, "ui");
+			L.controller.modelChanged(bridge$1.id);
+			const h = w.dispatcher.getHistory().length;
+			L.requests[0].resolve(llmPlan("sun_gear"));
+			assert.equal(await p, "stale");
+			await sleep$1(100);
+			assert.deepEqual(aiSince(w, h), []);
+		} finally {
+			L.close();
+		}
+	});
+	it("a model switch while a plan is playing cancels it before any further step", async () => {
+		const w = selected$1("sun_gear");
+		const L = lifecycle(w, 150);
+		try {
+			L.controller.ask({
+				question: "Explain this",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			L.requests[0].resolve(llmPlan("sun_gear", gearbox$1, 4));
+			assert.ok(await L.until(() => L.player.getState().phase === "narrating"));
+			w.dispatcher.dispatch({
+				type: "workspace.switchModel",
+				modelId: bridge$1.id
+			}, "ui");
+			const h = w.dispatcher.getHistory().length;
+			assert.ok(await L.until(() => L.player.getState().status === "cancelled"));
+			await sleep$1(200);
+			assert.deepEqual(aiSince(w, h), []);
+		} finally {
+			L.close();
+		}
+	});
+	it("rapid requests: only the last one plays, exactly once", async () => {
+		const L = lifecycle(selected$1("sun_gear"));
+		try {
+			const ids = [
+				"sun_gear",
+				"ring_gear",
+				"planet_carrier"
+			];
+			const results = ids.map((id) => L.controller.ask({
+				question: `Explain ${id}`,
+				questionType: "explain",
+				targetComponentId: id
+			}));
+			[
+				2,
+				0,
+				1
+			].forEach((i) => L.requests[i].resolve(llmPlan(ids[i])));
+			assert.deepEqual(await Promise.all(results), [
+				"stale",
+				"stale",
+				"started"
+			]);
+			assert.deepEqual(L.started, ["llm:planet_carrier"]);
+		} finally {
+			L.close();
+		}
+	});
+});
+describe("V5 failure handling (the user always gets an answer or a clear message)", () => {
+	for (const [label, err] of [
+		["quota exhausted", new TeachingServiceError("LLM_QUOTA_EXCEEDED", "quota")],
+		["not configured", new TeachingServiceError("LLM_NOT_CONFIGURED", "x")],
+		["backend unavailable", new TeachingServiceError("BACKEND_UNAVAILABLE", "x")],
+		["timeout", new TeachingServiceError("TIMEOUT", "x")]
+	]) it(`${label}: explains the selected part from the model data, with a notice`, async () => {
+		const L = lifecycle(selected$1("sun_gear"));
+		try {
+			const p = L.controller.ask({
+				question: "Explain this part",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			L.requests[0].reject(err);
+			assert.equal(await p, "fallback");
+			const plan = L.player.getState().plan;
+			assert.equal(plan.source, "modelData");
+			assert.equal(plan.targetComponentId, "sun_gear");
+			assert.ok(L.controller.getState().notice.includes(FALLBACK_NOTICE));
+			assert.ok(await L.until(() => L.n.played.length > 0), "it is spoken");
+		} finally {
+			L.close();
+		}
+	});
+	it("an AI plan that fails validation falls back instead of playing unsafe content", async () => {
+		const L = lifecycle(selected$1("sun_gear"));
+		try {
+			const p = L.controller.ask({
+				question: "Explain this part",
+				questionType: "explain",
+				targetComponentId: "sun_gear"
+			});
+			L.requests[0].resolve({
+				...llmPlan("sun_gear"),
+				modelId: "warren_truss_bridge"
+			});
+			assert.equal(await p, "fallback");
+			assert.match(L.controller.getState().notice, /could not be used safely/);
+			assert.equal(L.player.getState().plan.source, "modelData");
+		} finally {
+			L.close();
+		}
+	});
+	it("the request sent to the teacher carries the question type and only this model's facts", async () => {
+		const L = lifecycle(selected$1("sun_gear"));
+		try {
+			L.controller.ask({
+				question: "Why is it needed?",
+				questionType: "purpose",
+				targetComponentId: "sun_gear"
+			});
+			const body = L.requests[0].body;
+			assert.equal(body.questionType, "purpose");
+			assert.equal(body.facts.modelId, "planetary_gearbox");
+			assert.equal(body.facts.modelDescription, gearbox$1.description);
+			assert.ok(body.facts.components.every((c) => gearbox$1.getAllComponentIds().includes(c.id)));
+		} finally {
+			L.close();
+		}
+	});
+});
+describe("V5 narration: late TTS audio is never played", () => {
+	it("a clip stopped before its audio arrives never creates audio; queued clips are not even requested", async () => {
+		const g = globalThis;
+		const realFetch = g.fetch;
+		const realAudio = g.Audio;
+		let fetches = 0;
+		let audios = 0;
+		let release;
+		g.fetch = (async () => {
+			fetches++;
+			await new Promise((r) => release = r);
+			return new Response(new Uint8Array([
+				1,
+				2,
+				3
+			]), {
+				status: 200,
+				headers: { "Content-Type": "audio/wav" }
+			});
+		});
+		g.Audio = class {
+			constructor() {
+				audios++;
+			}
+			play() {
+				return Promise.resolve();
+			}
+			pause() {}
+		};
+		try {
+			const narrator = createTimbreNarrator(() => "en-IN", () => {});
+			const a = narrator.prepare("old step", "en-IN");
+			const b = narrator.prepare("prefetched next step", "en-IN");
+			a.play();
+			await sleep$1(10);
+			a.stop();
+			b.stop();
+			release();
+			await sleep$1(50);
+			assert.equal(await a.done, "stopped");
+			assert.equal(audios, 0, "no Audio created for a stopped clip");
+			assert.equal(fetches, 1, "the queued (prefetched) clip was never requested");
+		} finally {
+			g.fetch = realFetch;
+			g.Audio = realAudio;
+		}
+	});
+});
+describe("V5 grounded explanation from model data", () => {
+	it("uses the selected part's own facts and relationships", () => {
+		const w = selected$1("sun_gear");
+		const v = validateTeachingPlan(buildComponentBrief(gearbox$1, w.snapshot(false), "sun_gear", "explain"), w.snapshot(false), w.dispatcher.getContext());
+		assert.ok(v.ok, JSON.stringify(v));
+		const plan = v.plan;
+		const text = plan.steps.map((s) => s.narration).join(" ");
+		const meta = gearbox$1.getComponentMetadata("sun_gear");
+		assert.ok(text.includes(meta.role), "role");
+		assert.ok(text.includes("is driven by Primary Drive Shaft"), "relationship from the model");
+		assert.ok(text.includes("drives Planet Gear A, Planet Gear B and Planet Gear C"));
+		assert.ok(text.includes(meta.engineeringNotes[0]), "engineering note");
+		const hl = plan.steps.flatMap((s) => s.actions).find((a) => a.type === "component.highlight");
+		assert.deepEqual(hl.componentIds.sort(), [
+			"central_shaft",
+			"planet_gear_1",
+			"planet_gear_2",
+			"planet_gear_3"
+		]);
+		assert.equal(plan.steps[plan.steps.length - 1].claim, "notSimulated");
+		assert.match(text, /does not calculate forces, torque, friction or wear/);
+	});
+	it("failure questions are qualified as not simulated and name only linked parts", () => {
+		const raw = buildComponentBrief(gearbox$1, selected$1("planet_carrier").snapshot(false), "planet_carrier", "failure");
+		const last = raw.steps[raw.steps.length - 1].narration;
+		assert.match(last, /A failure cannot be simulated here/);
+		assert.ok(!/Sun Gear|Ring Gear|Drive Shaft/.test(last), "no unrelated part claimed");
+	});
+	it("every part of both models gets a valid, model-only brief (no invented links, no animation claim on the bridge)", () => {
+		for (const model of [gearbox$1, bridge$1]) {
+			const w = makeWorkspace(model);
+			const names = new Set(model.getAllComponentIds().map((id) => model.getComponentMetadata(id)?.name ?? id));
+			for (const id of [...model.getAllComponentIds(), null]) {
+				const v = validateTeachingPlan(buildComponentBrief(model, w.snapshot(false), id, "explain"), w.snapshot(false), w.dispatcher.getContext());
+				assert.ok(v.ok, `${model.id}/${id}: ${JSON.stringify(v)}`);
+				const ids = v.plan.steps.flatMap((s) => s.actions).flatMap((a) => a.componentIds ?? (a.componentId ? [a.componentId] : []));
+				assert.ok(ids.every((x) => model.getAllComponentIds().includes(x)));
+			}
+			assert.ok(names.size > 0);
+		}
+		const text = buildComponentBrief(bridge$1, makeWorkspace(bridge$1).snapshot(false), "bridge_deck").steps.map((s) => s.narration).join(" ");
+		assert.ok(!/animation/.test(text));
+		assert.match(text, /does not calculate forces or stresses/);
+	});
+});
+// tests/voiceFirst.test.ts
+/**
+* Voice-first milestone — navigation, conversation flow, interruption policy, language handling
+* and the LLM intent fallback mapping. The LLM and Prisma are SIMULATED here (fakes); the
+* dispatcher, viewer executor, camera, geometry, parser, validation and player are real.
+* Transcripts marked "Prisma" are real Gnani Prisma output (27 Oct 2026).
+*/
+var gearbox = modelRegistry.getModel(PLANETARY_GEARBOX_MODEL_ID);
+var bridge = modelRegistry.getModel(WARREN_TRUSS_MODEL_ID);
+var ALL = modelRegistry.getAllModels();
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function turn(w, transcript, language = "en-IN", extra = {}) {
+	const r = handleVoiceTurn({
+		transcript,
+		language,
+		dispatcher: w.dispatcher,
+		model: w.ws.model,
+		allModels: ALL,
+		lastDiscussed: w.memory.last,
+		teachingAvailable: true,
+		...extra
+	});
+	if (r.discussedComponentId) w.memory.last = {
+		modelId: w.ws.model.id,
+		componentId: r.discussedComponentId
+	};
+	return r;
+}
+var selected = (id, model = gearbox) => {
+	const w = makeWorkspace(model);
+	w.dispatcher.dispatch({
+		type: "component.select",
+		componentId: id
+	}, "ui");
+	return w;
+};
+var cmds = (r) => r.outcome.kind === "commands" ? r.outcome.commands : null;
+describe("Voice navigation through the shared dispatcher", () => {
+	for (const [lang, t, expected] of [
+		[
+			"en-IN",
+			"Zoom in",
+			[{
+				type: "camera.zoom",
+				direction: "in"
+			}]
+		],
+		[
+			"en-IN",
+			"Zoom out a little",
+			[{
+				type: "camera.zoom",
+				direction: "out"
+			}]
+		],
+		[
+			"en-IN",
+			"Turn left",
+			[{
+				type: "camera.orbit",
+				yawDeg: 30,
+				pitchDeg: 0
+			}]
+		],
+		[
+			"en-IN",
+			"Turn right",
+			[{
+				type: "camera.orbit",
+				yawDeg: -30,
+				pitchDeg: 0
+			}]
+		],
+		[
+			"en-IN",
+			"Show the front",
+			[{
+				type: "camera.view",
+				view: "front"
+			}]
+		],
+		[
+			"en-IN",
+			"Show the back",
+			[{
+				type: "camera.view",
+				view: "back"
+			}]
+		],
+		[
+			"en-IN",
+			"Show me the back of the gearbox",
+			[{
+				type: "camera.view",
+				view: "back"
+			}]
+		],
+		[
+			"en-IN",
+			"Show the top",
+			[{
+				type: "camera.view",
+				view: "top"
+			}]
+		],
+		[
+			"en-IN",
+			"Move left",
+			[{
+				type: "camera.pan",
+				direction: "left"
+			}]
+		],
+		[
+			"en-IN",
+			"Move right",
+			[{
+				type: "camera.pan",
+				direction: "right"
+			}]
+		],
+		[
+			"en-IN",
+			"Reset the view",
+			[{ type: "camera.reset" }]
+		],
+		[
+			"te-IN",
+			"కెమెరాని ఎడమవైపు తిప్పు",
+			[{
+				type: "camera.orbit",
+				yawDeg: 30,
+				pitchDeg: 0
+			}]
+		],
+		[
+			"hi-IN",
+			"थोड़ा ज़ूम इन करो।",
+			[{
+				type: "camera.zoom",
+				direction: "in"
+			}]
+		],
+		[
+			"hi-IN",
+			"मुझे पीछे का दृश्य दिखाओ।",
+			[{
+				type: "camera.view",
+				view: "back"
+			}]
+		],
+		[
+			"te-IN",
+			"షో మీ ద బ్యాక్",
+			[{
+				type: "camera.view",
+				view: "back"
+			}]
+		],
+		[
+			"hi-IN",
+			"शो मी दी बैक",
+			[{
+				type: "camera.view",
+				view: "back"
+			}]
+		]
+	]) it(`${lang}: "${t}"`, () => assert.deepEqual(cmds(turn(selected("sun_gear"), t, lang)), expected));
+	it("\"Zoom in on this gear\" / \"Focus on this part\" / \"ఈ గేర్‌ని దగ్గరగా చూపించు\" focus the selected part", () => {
+		for (const [t, lang] of [
+			["Zoom in on this gear", "en-IN"],
+			["Focus on this part", "en-IN"],
+			["ఈ గేర్‌ని దగ్గరగా చూపించు", "te-IN"]
+		]) assert.deepEqual(cmds(turn(selected("sun_gear"), t, lang)), [{
+			type: "component.select",
+			componentId: "sun_gear"
+		}, {
+			type: "component.focus",
+			componentId: "sun_gear"
+		}], t);
+	});
+	it("bottom view: a clear reply (camera kept above the grid), nothing dispatched — also on the bridge", () => {
+		for (const [model, t] of [
+			[gearbox, "Show the bottom"],
+			[bridge, "Show the bottom"],
+			[gearbox, "show me the view from below"],
+			[gearbox, "नीचे से दिखाओ"]
+		]) {
+			const w = makeWorkspace(model);
+			const before = w.dispatcher.getHistory().length;
+			const r = turn(w, t);
+			assert.deepEqual(r.outcome, {
+				kind: "unavailable",
+				intent: "view",
+				reason: "noBottomView"
+			}, t);
+			assert.match(r.caption, /no bottom view/);
+			assert.equal(w.dispatcher.getHistory().length, before);
+		}
+		assert.equal(turn(makeWorkspace(bridge), "select the bottom chords").outcome.kind, "commands", "the bridge part is still reachable by name");
+	});
+	it("views land where intended and a new command supersedes a transition in progress", () => {
+		const w = makeWorkspace();
+		turn(w, "Show the back");
+		w.tick(1e3);
+		assert.equal(w.snapshot(false).camera.value.view, "back");
+		turn(w, "Show the front");
+		w.tick(100);
+		turn(w, "Show the top");
+		w.tick(1e3);
+		assert.equal(w.snapshot(false).camera.value.view, "top");
+	});
+	it("turning rotates around the model; moving pans the target", () => {
+		const w = makeWorkspace();
+		turn(w, "reset the view");
+		w.tick(1e3);
+		const t0 = w.controller.getGoalPose().target.clone();
+		turn(w, "Turn left");
+		w.tick(1e3);
+		assert.ok(w.controller.getGoalPose().target.distanceTo(t0) < 1e-6, "rotation keeps the target");
+		turn(w, "Move left");
+		w.tick(1e3);
+		assert.ok(w.controller.getGoalPose().target.distanceTo(t0) > .1, "panning moves the target");
+	});
+	it("voice and gesture/mouse use the same dispatcher and validation", () => {
+		const w = makeWorkspace();
+		turn(w, "zoom in");
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "ring_gear"
+		}, "gesture");
+		w.dispatcher.dispatch({
+			type: "component.select",
+			componentId: "piston"
+		}, "mouse");
+		const h = w.dispatcher.getHistory().slice(-3).map((r) => `${r.source}:${r.status}`);
+		assert.deepEqual(h, [
+			"voice:executed",
+			"gesture:executed",
+			"mouse:rejected"
+		]);
+	});
+});
+function fakeNarrator() {
+	const spoken = [];
+	const clips = [];
+	return {
+		narrator: { prepare(text, language) {
+			const rec = {
+				stopped: false,
+				paused: false
+			};
+			clips.push(rec);
+			let resolve;
+			const done = new Promise((r) => resolve = r);
+			let timer = null;
+			return {
+				done,
+				play() {
+					spoken.push({
+						text,
+						language
+					});
+					let left = 120;
+					timer = setInterval(() => {
+						if (rec.paused || rec.stopped) return;
+						left -= 5;
+						if (left <= 0) {
+							clearInterval(timer);
+							resolve("ended");
+						}
+					}, 5);
+					timer.unref?.();
+				},
+				pause() {
+					rec.paused = true;
+				},
+				resume() {
+					rec.paused = false;
+				},
+				stop() {
+					rec.stopped = true;
+					if (timer) clearInterval(timer);
+					resolve("stopped");
+				}
+			};
+		} },
+		spoken,
+		clips
+	};
+}
+function plan(target, steps = 3) {
+	return {
+		schemaVersion: 1,
+		planId: `${target ?? "model"}`.padEnd(32, "a").replace(/[^a-f0-9]/g, "b").slice(0, 32),
+		modelId: "planetary_gearbox",
+		targetComponentId: target,
+		title: `About ${target}`,
+		explanation: "x",
+		cannotAnswer: null,
+		steps: Array.from({ length: steps }, (_, i) => ({
+			index: i,
+			kind: "demonstrate",
+			claim: "metadata",
+			narration: `${target} ${i}.`,
+			caption: `c${i}`,
+			targetComponentId: target,
+			actions: target ? [{
+				type: "component.focus",
+				componentId: target
+			}] : [],
+			waitFor: "narration",
+			holdMs: 0
+		})),
+		rejectedSteps: [],
+		followUpSuggestions: []
+	};
+}
+/** The dock's wiring without React: turn -> supersede/ask/control, simulated teacher replies. */
+function conversation(w) {
+	const loop = setInterval(() => w.tick(16), 4);
+	loop.unref?.();
+	const n = fakeNarrator();
+	const player = new TeachingPlanPlayer({
+		dispatcher: w.dispatcher,
+		getSnapshot: () => getSceneSnapshot(w.dispatcher, w.ws.model),
+		narrator: n.narrator,
+		pollMs: 4,
+		settleTimeoutMs: 1500
+	});
+	const detach = player.attach();
+	const requests = [];
+	let uiLanguage = "en-IN";
+	const controller = new TeachingController({
+		dispatcher: w.dispatcher,
+		player,
+		getModel: () => w.ws.model,
+		getLanguage: () => uiLanguage,
+		requestPlan: (body) => new Promise((resolve) => requests.push({
+			body,
+			resolve
+		})),
+		onPlanStarted: (p) => {
+			if (p.targetComponentId) w.memory.last = {
+				modelId: p.modelId,
+				componentId: p.targetComponentId
+			};
+		}
+	});
+	const say = (text) => {
+		const lang = turnLanguage(text, uiLanguage);
+		uiLanguage = lang;
+		const r = turn(w, text, lang, {
+			teachingActive: controller.isActive(),
+			onSupersede: () => controller.supersede()
+		});
+		if (r.status === "teach" && r.teach) controller.ask({
+			...r.teach,
+			language: r.teach.language ?? lang
+		});
+		if (r.status === "control") {
+			if (r.control === "resume") player.resume();
+			else if (r.control === "pause") player.pause();
+			else controller.supersede();
+		}
+		return r;
+	};
+	const answer = async (i, target) => {
+		requests[i].resolve(plan(target));
+		const t0 = Date.now();
+		while (!(player.getState().plan?.targetComponentId === target && player.getState().phase === "narrating") && Date.now() - t0 < 3e3) await sleep(5);
+	};
+	const close = () => {
+		controller.cancel();
+		detach();
+		clearInterval(loop);
+	};
+	return {
+		player,
+		controller,
+		requests,
+		n,
+		say,
+		answer,
+		close,
+		language: () => uiLanguage
+	};
+}
+describe("Conversation flow (Phase 2) and interruption scenarios", () => {
+	it("select -> explain -> why -> correction -> Telugu follow-up -> camera command", async () => {
+		const w = selected("sun_gear");
+		const c = conversation(w);
+		try {
+			assert.equal(c.say("Explain this part.").teach.targetComponentId, "sun_gear");
+			await c.answer(0, "sun_gear");
+			const why = c.say("Why is it needed?");
+			assert.deepEqual([why.teach.targetComponentId, why.teach.questionType], ["sun_gear", "purpose"]);
+			await c.answer(1, "sun_gear");
+			const fix = c.say("No, not that one. Explain the planet carrier.");
+			assert.equal(fix.teach.targetComponentId, "planet_carrier");
+			await c.answer(2, "planet_carrier");
+			const te = c.say("ఇది అసలు ఎందుకు అవసరం?");
+			assert.deepEqual([te.teach.targetComponentId, te.teach.questionType], ["planet_carrier", "purpose"]);
+			assert.equal(c.requests[3].body.language, "te-IN", "answer requested in Telugu");
+			assert.equal(c.language(), "te-IN");
+			await c.answer(3, "planet_carrier");
+			assert.equal(c.n.spoken[c.n.spoken.length - 1].language, "te-IN", "narration language = request language");
+			const h = w.dispatcher.getHistory().length;
+			const back = c.say("Show me the back.");
+			assert.deepEqual(cmds(back), [{
+				type: "camera.view",
+				view: "back"
+			}]);
+			assert.equal(c.language(), "en-IN", "latest request was English");
+			assert.equal(c.player.getState().status, "paused", "camera command pauses the explanation");
+			await sleep(250);
+			assert.ok(!w.dispatcher.getHistory().slice(h).some((r) => r.source === "ai"), "no stale plan action after the camera command");
+		} finally {
+			c.close();
+		}
+	});
+	it("Scenario A: a new target stops the old narration; the old plan issues nothing more", async () => {
+		const w = makeWorkspace();
+		const c = conversation(w);
+		try {
+			c.say("Explain the sun gear.");
+			await c.answer(0, "sun_gear");
+			const playing = c.n.clips.length - 1;
+			c.say("No, explain the planet carrier.");
+			assert.ok(c.n.clips[playing].stopped, "old audio stopped at once");
+			const h = w.dispatcher.getHistory().length;
+			await c.answer(1, "planet_carrier");
+			assert.ok(!w.dispatcher.getHistory().slice(h).some((r) => JSON.stringify(r.command).includes("sun_gear")));
+		} finally {
+			c.close();
+		}
+	});
+	it("Scenario B: interrupting in Telugu (and then Hindi) keeps the part and answers in that language", async () => {
+		const c = conversation(makeWorkspace());
+		try {
+			c.say("Explain the ring gear.");
+			await c.answer(0, "ring_gear");
+			const te = c.say("దీని ఉపయోగం ఏమిటి");
+			assert.deepEqual([te.teach.targetComponentId, c.requests[1].body.language], ["ring_gear", "te-IN"]);
+			await c.answer(1, "ring_gear");
+			const hi = c.say("इसकी जरूरत क्यों है");
+			assert.deepEqual([hi.teach.targetComponentId, c.requests[2].body.language], ["ring_gear", "hi-IN"]);
+		} finally {
+			c.close();
+		}
+	});
+	it("Scenario C: \"zoom in\" during a demonstration runs, pauses the plan, and \"continue\" resumes it", async () => {
+		const c = conversation(makeWorkspace());
+		try {
+			c.say("Explain how this gearbox works.");
+			await c.answer(0, null);
+			const zoom = c.say("Zoom in");
+			assert.equal(zoom.status, "executed");
+			assert.equal(c.player.getState().status, "paused");
+			const pos = c.player.getState().stepPosition;
+			await sleep(300);
+			assert.equal(c.player.getState().stepPosition, pos, "the plan does not continue (or undo the zoom) on its own");
+			assert.equal(c.say("continue").control, "resume");
+			assert.equal(c.player.getState().status, "running");
+		} finally {
+			c.close();
+		}
+	});
+	it("Scenario D: \"What would happen if it were missing?\" stays on the ring gear", async () => {
+		const c = conversation(makeWorkspace());
+		try {
+			c.say("Explain the ring gear.");
+			await c.answer(0, "ring_gear");
+			const r = c.say("What would happen if it were missing?");
+			assert.deepEqual([r.teach.targetComponentId, r.teach.questionType], ["ring_gear", "failure"]);
+		} finally {
+			c.close();
+		}
+	});
+});
+describe("Conversation language", () => {
+	it("detects the spoken language from the transcript script", () => {
+		assert.equal(scriptLanguage("ఇది అసలు ఎందుకు అవసరం"), "te-IN");
+		assert.equal(scriptLanguage("मुझे पीछे का दृश्य दिखाओ"), "hi-IN");
+		assert.equal(scriptLanguage("show me the back"), null);
+		assert.equal(turnLanguage("ఇది ఎందుకు", "en-IN"), "te-IN");
+		assert.equal(turnLanguage("show me the back", "te-IN"), "en-IN");
+		assert.equal(turnLanguage("पीछे दिखाओ", "mr-IN"), "mr-IN", "Marathi shares Devanagari; keep the selection");
+		assert.equal(turnLanguage("zoom in", "ta-IN"), "ta-IN");
+	});
+	const PRISMA = {
+		teluguSpeech: {
+			"en-IN": "idi asal educ avasar",
+			"hi-IN": "इधर असल एंड को अवसर",
+			"te-IN": "ఇది అసలు ఎందుకు అవసరం"
+		},
+		hindiSpeech: {
+			"en-IN": "mujhe pichhe ka drishya dikhao",
+			"te-IN": "ముజి కా దృశ్య ది ఖా",
+			"hi-IN": "मुझे पीछे का दृश्य दिखाओ।"
+		},
+		englishSpeech: {
+			"en-IN": "show me the back",
+			"te-IN": "షో మీ ద బ్యాక్",
+			"hi-IN": "शो मी दी बैक"
+		}
+	};
+	const understoodBy = (w) => (t) => previewTurn({
+		transcript: t,
+		dispatcher: w.dispatcher,
+		model: gearbox,
+		allModels: ALL
+	}).kind !== "noMatch";
+	it("Telugu spoken while English is selected: re-transcribed and understood as Telugu", async () => {
+		const w = selected("planet_carrier");
+		const calls = [];
+		const r = await transcribeWithLanguageRetry(new Blob(), "en-IN", async (_b, l) => {
+			calls.push(l);
+			return PRISMA.teluguSpeech[l];
+		}, understoodBy(w));
+		assert.deepEqual(r, {
+			text: "ఇది అసలు ఎందుకు అవసరం",
+			language: "te-IN",
+			retried: true
+		});
+		assert.deepEqual(calls.sort(), [
+			"en-IN",
+			"hi-IN",
+			"te-IN"
+		]);
+	});
+	it("Hindi spoken while Telugu is selected: understood as Hindi", async () => {
+		const w = makeWorkspace();
+		const r = await transcribeWithLanguageRetry(new Blob(), "te-IN", async (_b, l) => PRISMA.hindiSpeech[l], understoodBy(w));
+		assert.deepEqual([r.language, r.retried], ["hi-IN", true]);
+	});
+	it("understood on the first try: one Prisma call only (English heard as Telugu is still understood)", async () => {
+		const w = makeWorkspace();
+		let calls = 0;
+		const r = await transcribeWithLanguageRetry(new Blob(), "te-IN", async (_b, l) => {
+			calls++;
+			return PRISMA.englishSpeech[l];
+		}, understoodBy(w));
+		assert.deepEqual([
+			calls,
+			r.retried,
+			r.text
+		], [
+			1,
+			false,
+			"షో మీ ద బ్యాక్"
+		]);
+	});
+	it("nothing understood in any language: keeps the first transcript (then the LLM fallback / \"didn't understand\")", async () => {
+		const w = makeWorkspace();
+		const r = await transcribeWithLanguageRetry(new Blob(), "en-IN", async () => "hmm mm", understoodBy(w));
+		assert.deepEqual(r, {
+			text: "hmm mm",
+			language: "en-IN",
+			retried: true
+		});
+	});
+	it("a cancelled turn rejects instead of returning a late transcript", async () => {
+		const w = makeWorkspace();
+		const c = new AbortController();
+		const p = transcribeWithLanguageRetry(new Blob(), "en-IN", async (_b, l) => {
+			if (l === "en-IN") c.abort();
+			return PRISMA.teluguSpeech[l];
+		}, understoodBy(w), c.signal);
+		await assert.rejects(p);
+	});
+});
+describe("LLM intent fallback: every intent maps to a validated deterministic phrase", () => {
+	const nameOf = (id) => lexiconFor(gearbox).find((e) => e.componentId === id)?.displayName ?? null;
+	for (const intent of INTERPRET_INTENTS) it(`${intent}`, () => {
+		const i = {
+			intent,
+			componentId: intent.endsWith("_part") || intent === "related_parts" ? "ring_gear" : null,
+			language: null
+		};
+		const phrase = canonicalPhrase(i, nameOf);
+		if (intent === "unclear" || intent === "unsupported") {
+			assert.equal(phrase, null);
+			return;
+		}
+		const outcome = previewTurn({
+			transcript: phrase,
+			dispatcher: selected("sun_gear").dispatcher,
+			model: gearbox,
+			allModels: ALL,
+			teachingActive: intent.endsWith("_explanation")
+		});
+		assert.notEqual(outcome.kind, "noMatch", `"${phrase}" must be understood`);
+		if (i.componentId && outcome.kind === "question") assert.equal(outcome.partId, "ring_gear", phrase);
+		if (i.componentId && outcome.kind === "commands") assert.equal(outcome.partId, "ring_gear", phrase);
+	});
+	it("client errors are reported, unknown intents rejected", async () => {
+		const respond = (status, data) => (async () => new Response(JSON.stringify(data), { status }));
+		const body = {
+			transcript: "t",
+			language: "en-IN",
+			modelId: "m",
+			modelName: "M",
+			components: [],
+			topicComponentId: null,
+			teachingActive: false
+		};
+		assert.deepEqual(await requestInterpretation(body, void 0, respond(200, {
+			intent: "zoom_in",
+			componentId: null,
+			language: "te-IN"
+		})), {
+			intent: "zoom_in",
+			componentId: null,
+			language: "te-IN"
+		});
+		await assert.rejects(requestInterpretation(body, void 0, respond(200, { intent: "format_disk" })));
+		await assert.rejects(requestInterpretation(body, void 0, respond(429, { error: { code: "LLM_QUOTA_EXCEEDED" } })), (e) => e.code === "LLM_QUOTA_EXCEEDED");
+	});
+});
+describe("Inspector \"Ask the tutor\" requests", () => {
+	it("every button phrase, for every part of both models, targets that part with the right question type", () => {
+		for (const model of [gearbox, bridge]) for (const id of model.getAllComponentIds()) {
+			const name = model.getComponentMetadata(id).name;
+			const w = makeWorkspace(model);
+			for (const [phrase, type] of [
+				[`explain the ${name}`, "explain"],
+				[`why is the ${name} needed`, "purpose"],
+				[`how does the ${name} work`, "howWorks"],
+				[`what happens if the ${name} fails`, "failure"]
+			]) {
+				const o = previewTurn({
+					transcript: phrase,
+					dispatcher: w.dispatcher,
+					model,
+					allModels: ALL
+				});
+				assert.equal(o.kind, "question", `${model.id}: "${phrase}" -> ${JSON.stringify(o)}`);
+				if (o.kind === "question") assert.deepEqual([o.partId, o.question], [id, type], phrase);
+			}
+		}
+	});
+	it("\"explain how this model works\" is a whole-model question on both models", () => {
+		for (const model of [gearbox, bridge]) {
+			const o = previewTurn({
+				transcript: "explain how this model works",
+				dispatcher: makeWorkspace(model).dispatcher,
+				model,
+				allModels: ALL
+			});
+			assert.deepEqual(o.kind === "question" && [o.question, o.partId], ["explain", void 0]);
+		}
+	});
+});
+describe("Fallback language honesty", () => {
+	it("a Telugu request answered from the (English) model data says so", async () => {
+		const { ENGLISH_FALLBACK_NOTE } = await Promise.resolve().then(() => teachingController_exports);
+		const c = conversation(selected("planet_carrier"));
+		try {
+			const p = c.controller.ask({
+				question: "ఇది ఎందుకు అవసరం",
+				questionType: "purpose",
+				targetComponentId: "planet_carrier",
+				language: "te-IN"
+			});
+			c.requests[0].resolve(Promise.reject(Object.assign(/* @__PURE__ */ new Error("quota"), { code: "LLM_QUOTA_EXCEEDED" })));
+			assert.equal(await p, "fallback");
+			assert.ok(c.controller.getState().notice.includes(ENGLISH_FALLBACK_NOTE));
+			assert.equal(c.player.getState().plan.language, "en-IN");
+		} finally {
+			c.close();
+		}
 	});
 });
 export {};

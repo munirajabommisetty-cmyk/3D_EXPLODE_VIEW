@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Icon } from '../ui/Icon';
 import { gestureDiagnostics, type GestureDiagnosticData } from '../../utils/telemetry';
 import './GestureDiagnosticPanel.css';
 
@@ -77,7 +78,7 @@ export const GestureDiagnosticPanel: React.FC<GestureDiagnosticPanelProps> = ({
             onClick={onToggle}
             title="Close Panel (Press 'D')"
           >
-            ✕
+            <Icon name="close" size={14} />
           </button>
         </div>
       </div>

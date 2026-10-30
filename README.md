@@ -1,79 +1,242 @@
-# Gesture-Controlled 3D Machine Explorer
+# GestureLab CAD
 
-An interactive web application enabling touchless exploration and inspection of 3D mechanical assemblies using hand gestures captured through a standard consumer webcam.
+### Explore in 3D. Interact with AI. Understand How Things Work.
 
----
+**GestureLab CAD** is an AI-powered, voice-interactive 3D learning and exploration platform designed to make complex concepts easier to explore and understand.
 
-## 📌 Current Project Status
+Traditional learning often relies on static diagrams, images, and explanations. However, understanding how individual components connect, interact, and function as part of a larger system can be challenging.
 
-- **Current Phase**: **Phase 6: Testing, Performance Evaluation & Reliability (Task 6.1 Complete, Task 6.2 Telemetry Engine Complete)**
-- **Application Status**: Task 6.2 (Latency & Framerate Benchmarking Engine) is **Implemented**. The project features a typed, memory-bounded performance telemetry service (`telemetry.ts`) tracking WebGL render FPS, frame-time statistics (min/max/avg/P95), vision inference and temporal smoothing durations, tracking FPS, and application-level pipeline latency without GC pauses or loop overhead. Complete benchmarking protocols and metric formulas are documented in `docs/BENCHMARKS.md` (physical hardware measurements remain pending).
-- **Verification**: 129 automated unit and integration tests across 27 suites (`npm test` in `frontend/` or `node tests/test_frontend/run_tests.mjs` at repository root), lint (`oxlint`), and production build (`tsc -b && vite build`) all pass with 0 errors and 0 warnings.
-- **Next Task**: **Phase 6, Task 6.2 Physical Benchmark Execution & Task 6.3: Lighting & Occlusion Edge-Case Hardening**.
+GestureLab CAD addresses this challenge by bringing together **interactive 3D visualization, AI-powered explanations, voice interaction, and gesture-based controls** in one platform.
 
----
-
-## 🎯 Planned Capabilities (Design Targets)
-
-> [!NOTE]
-> The capabilities below describe the **intended design targets**, not yet implemented functionality:
-
-- **Browser-Based 3D Mechanical Viewer**: Interactive rendering of a multi-part mechanical assembly (e.g. planetary gearbox, engine) using Three.js.
-- **Real-Time Hand Tracking**: Pretrained MediaPipe Hand Landmarker detecting 21 3D landmarks via webcam.
-- **Geometric Gesture Recognition**:
-  - `Open Palm`: Natural orbital rotation of the 3D model.
-  - `Pointing`: Screen-space raycasting cursor to hover and select mechanical components.
-  - `Pinch`: Camera zoom / dolly and inspection triggers.
-- **Component Inspection HUD**: Interactive sidebar displaying engineering specifications (materials, gear ratios, operational speeds) of selected parts.
-- **Offline ML Gesture Experiments (Future Phase 7)**: Dataset recording and training pipeline in Python to compare heuristic rules against custom machine learning classifiers.
-- **Local AI Explainer (Future Phase 8)**: Optional context-aware engineering explanations powered by local open-weight models (e.g. Ollama `llama3.2:3b`) without paid cloud APIs.
+Whether exploring a mechanical gearbox, understanding a suspension bridge, examining a steam engine, or learning about the human eye, users can interact with 3D models and ask questions to gain a clearer understanding of how things work.
 
 ---
 
-## 📚 Documentation Index
+## Project Overview
 
-All planning, architectural, and design specifications are cataloged below:
+GestureLab CAD aims to transform passive learning into an interactive exploration experience.
 
-| Document | Description |
-| :--- | :--- |
-| **[docs/PRD.md](docs/PRD.md)** | Product Requirements Document: problem statement, personas, MVP vs. future scope, and acceptance criteria. |
-| **[ARCHITECTURE.md](ARCHITECTURE.md)** | System architecture, browser-first MVP strategy, module responsibilities, coordinate transforms, and event interfaces. |
-| **[docs/DESIGN.md](docs/DESIGN.md)** | Visual design principles, UI layout, screen wireframes, component inspection panel, and application states. |
-| **[docs/RULES.md](docs/RULES.md)** | Engineering and collaboration rules governing AI pair programming and code safety. |
-| **[docs/TASKS.md](docs/TASKS.md)** | **Single source of truth** for incremental tasks across Phases 0 through 8 with explicit dependencies and verification criteria. |
-| **[docs/TEST_PLAN.md](docs/TEST_PLAN.md)** | Testing strategy covering automated unit/component tests, manual webcam protocols, and failure edge-cases. |
-| **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** | Performance benchmark specifications, telemetry metric formulas, targets, and measurement protocols. |
-| **[docs/SECURITY.md](docs/SECURITY.md)** | Security and privacy guarantees: 100% local video processing, zero camera data transmission, and secret management. |
-| **[docs/DECISIONS.md](docs/DECISIONS.md)** | Architectural Decision Records (ADRs) logging technology choices, evaluated alternatives, and open proposals. |
-| **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** | High-level phased roadmap aligned directly with `docs/TASKS.md`. |
+Instead of simply viewing a diagram or model, users can:
+
+* Explore complex structures through interactive 3D models.
+* Rotate, zoom, and inspect individual components.
+* Understand how different components work together.
+* Ask questions naturally using voice interaction.
+* Receive AI-generated explanations.
+* Listen to explanations through text-to-speech.
+* Interact with 3D environments using hand gestures.
+
+The platform is designed for students, educators, and curious learners across multiple domains.
 
 ---
 
-## 🛠️ Repository Layout
+## Key Features
 
+### 1. Interactive 3D Visualization
+
+* Explore detailed 3D models.
+* Rotate, zoom, and inspect structures.
+* Select individual components.
+* Understand the relationships between different parts.
+
+### 2. AI-Powered Explanations
+
+* Ask questions about the displayed 3D models.
+* Receive context-aware AI-generated explanations.
+* Understand complex concepts through natural-language interaction.
+
+### 3. Voice-Based Interaction
+
+GestureLab CAD integrates Gnani AI speech technologies to provide a natural voice interaction experience.
+
+* **Gnani AI Prisma – Speech-to-Text (STT):** Converts spoken questions into text.
+* **Gemini AI – Reasoning and Response Generation:** Processes the transcribed question and generates an explanation.
+* **Gnani AI Timbre – Text-to-Speech (TTS):** Converts the generated explanation into spoken audio.
+
+This creates a voice interaction pipeline that allows users to ask questions and listen to AI-generated responses.
+
+### 4. Gesture-Based Controls
+
+* Interact with 3D models using hand gestures.
+* Detect hand landmarks using MediaPipe.
+* Recognize supported gestures for controlling the 3D environment.
+* Provide an alternative to conventional mouse-based interaction.
+
+### 5. Multi-Domain Exploration
+
+GestureLab CAD is not restricted to mechanical engineering. It supports exploration across different domains.
+
+| Domain                        | Example Models                  |
+| ----------------------------- | ------------------------------- |
+| Mechanical Engineering        | Gearbox and internal mechanisms |
+| Architecture & Infrastructure | Suspension bridge               |
+| Mechanical Systems            | Steam engine                    |
+| Biology & Human Anatomy       | Human eye                       |
+
+---
+
+## How the AI Voice Interaction Works
+
+The voice assistant follows this processing pipeline:
+
+```text
+          User Speaks a Question
+                    |
+                    v
+          Gnani AI Prisma (STT)
+                    |
+                    v
+             Speech to Text
+                    |
+                    v
+              Gemini AI
+        Reasoning & Response Generation
+                    |
+                    v
+          Gnani AI Timbre (TTS)
+                    |
+                    v
+          Generated Speech Audio
+                    |
+                    v
+          User Hears Explanation
 ```
-CV_3D_GESTURE/
-├── docs/                           # Central planning and specification documents
-│   ├── PRD.md                      # Product Requirements Document
-│   ├── DESIGN.md                   # UI layout and visual design specification
-│   ├── RULES.md                    # AI development rules and guidelines
-│   ├── TASKS.md                    # Detailed task breakdown (source of truth)
-│   ├── TEST_PLAN.md                # Automated and manual verification strategy
-│   ├── SECURITY.md                 # Privacy and security policies
-│   └── DECISIONS.md                # Architectural Decision Records (ADRs)
-├── frontend/                       # React + TypeScript + Three.js web application (scaffold)
-├── hand_tracker/                   # Python vision pipeline (deferred/scaffold)
-├── backend/                        # FastAPI & WebSocket server (deferred/scaffold)
-├── experiments/                    # ML experiment sandbox and landmark datasets
-│   ├── data/                       # Raw and processed landmark records
-│   └── models/                     # Saved classifier weights (.pkl, .onnx)
-├── assets/                         # 3D models (GLTF/GLB) and static media
-│   └── models_3d/                  # Mechanical assembly meshes
-├── tests/                          # Automated test suites
-├── .gitignore                      # Multi-stack ignore rules (Python, Node, ML artifacts)
-├── .env                            # User environment configuration (preserved)
-├── ipy_kernel.ipynb                # User exploratory notebook (preserved)
-├── README.md                       # Project index and documentation portal
-├── ARCHITECTURE.md                 # System architecture and data flow
-└── DEVELOPMENT_PLAN.md             # Phased implementation roadmap
 
+The separation of speech recognition, AI reasoning, and speech generation allows each component to perform its specific responsibility.
+
+---
+
+## Technology Stack
+
+| Component            | Technology      |
+| -------------------- | --------------- |
+| Frontend             | React           |
+| Programming Language | TypeScript      |
+| 3D Visualization     | Three.js        |
+| Hand Tracking        | MediaPipe       |
+| Backend              | Python, FastAPI |
+| AI Reasoning         | Google Gemini   |
+| Speech-to-Text       | Gnani AI Prisma |
+| Text-to-Speech       | Gnani AI Timbre |
+
+---
+
+## System Architecture
+
+At a high level, GestureLab CAD consists of the following components:
+
+```text
+                  USER
+                   |
+          +--------+--------+
+          |                 |
+          v                 v
+     3D Interaction     Voice Input
+          |                 |
+          v                 v
+    React + Three.js   Gnani AI Prisma
+          |                 |
+          |                 v
+          |            FastAPI Backend
+          |                 |
+          |                 v
+          |              Gemini AI
+          |                 |
+          |                 v
+          |           Generated Response
+          |                 |
+          |                 v
+          |           Gnani AI Timbre
+          |                 |
+          +--------+--------+
+                   |
+                   v
+             USER EXPERIENCE
+
+       MediaPipe Hand Tracking
+                   |
+                   v
+          Gesture Recognition
+                   |
+                   v
+           3D Scene Controls
+```
+
+*Conceptual architecture illustrating the major components and their responsibilities.*
+
+---
+
+## Who Can Benefit?
+
+**Students**
+
+* Explore difficult academic concepts visually.
+* Understand complex structures and mechanisms.
+* Clarify doubts through AI-powered assistance.
+
+**Educators**
+
+* Support explanations with interactive 3D models.
+* Demonstrate how components and systems work.
+
+**Curious Learners**
+
+* Explore real-world structures and systems.
+* Learn through visual interaction and natural questions.
+
+---
+
+## Project Vision
+
+Our vision is to make complex concepts easier to explore, understand, and interact with.
+
+By combining 3D visualization, AI-powered explanations, voice technologies, and gesture recognition, GestureLab CAD aims to create a more engaging way to learn about the world around us.
+
+**More than just viewing 3D models — explore, interact, and understand.**
+
+---
+
+## Project Status
+
+GestureLab CAD is an actively developed project.
+
+The platform brings together multiple technologies into a unified interactive learning experience. Features and supported models may evolve as development continues.
+
+---
+
+## Future Scope
+
+Potential areas for further development include:
+
+* Expanding the collection of 3D educational models.
+* Supporting additional domains and subjects.
+* Improving AI explanations and model-specific context.
+* Enhancing gesture recognition and interaction.
+* Improving the overall learning experience and accessibility.
+
+---
+
+## Acknowledgements
+
+This project integrates technologies and tools from:
+
+* Google Gemini
+* Gnani AI – Prisma and Timbre
+* Three.js
+* MediaPipe
+* React
+* FastAPI
+
+---
+
+## Author
+
+**Muniraja**
+
+B.Tech – Artificial Intelligence & Machine Learning
+
+---
+
+### GestureLab CAD
+
+**Explore in 3D. Interact with AI. Understand How Things Work.**

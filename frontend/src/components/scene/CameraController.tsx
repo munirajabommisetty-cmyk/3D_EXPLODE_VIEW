@@ -35,6 +35,41 @@ export const CAMERA_PRESETS: Record<CameraPreset, CameraPresetConfig> = {
   },
 };
 
+/** All named views reachable by commands: the three fixed presets plus orbit-relative sides. */
+export type CameraView = CameraPreset | 'back' | 'left' | 'right';
+
+/**
+ * Directions (from target towards camera) for side views. They keep the current target and
+ * distance, so they work for any model size. A slight elevation keeps the ground grid readable.
+ */
+const SIDE_VIEW_DIRECTIONS: Record<'back' | 'left' | 'right', THREE.Vector3> = {
+  back: new THREE.Vector3(0, 0.06, -1).normalize(),
+  left: new THREE.Vector3(-1, 0.06, 0).normalize(),
+  right: new THREE.Vector3(1, 0.06, 0).normalize(),
+};
+
+/** Default duration of command-driven camera transitions (ms). */
+export const DEFAULT_TRANSITION_MS = 350;
+
+export interface CameraPose {
+  position: THREE.Vector3;
+  target: THREE.Vector3;
+}
+
+interface CameraTransition {
+  startMs: number;
+  durationMs: number;
+  fromTarget: THREE.Vector3;
+  toTarget: THREE.Vector3;
+  fromSph: THREE.Spherical;
+  toSph: THREE.Spherical;
+  /** Auto-orbit state to restore when the transition ends or is cancelled. */
+  restoreAutoRotate: boolean;
+}
+
+const easeInOutCubic = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const nowMs = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
 export interface CameraControllerOptions {
   enableDamping?: boolean;
   dampingFactor?: number;
@@ -42,7 +77,7 @@ export interface CameraControllerOptions {
   maxDistance?: number;
   autoRotate?: boolean;
   autoRotateSpeed?: number;
-  onPresetChange?: (preset: CameraPreset) => void;
+  onPresetChange?: (preset: CameraView) => void;
 }
 
 /**
@@ -53,8 +88,9 @@ export class CameraController {
   public readonly camera: THREE.PerspectiveCamera;
   private readonly domElement: HTMLElement;
   private activePreset: CameraPreset = 'isometric';
-  private readonly onPresetChange?: (preset: CameraPreset) => void;
+  private readonly onPresetChange?: (preset: CameraView) => void;
   private isInteracting: boolean = false;
+  private transition: CameraTransition | null = null;
 
   // Keydown event handler ref for cleanup
   private readonly handleKeyDownBound: (e: KeyboardEvent) => void;
@@ -109,6 +145,7 @@ export class CameraController {
     const config = CAMERA_PRESETS[preset];
     if (!config) return;
 
+    this.cancelTransition(); // an explicit instant preset (key/button) wins over a running transition
     this.activePreset = preset;
     this.applyPresetDirect(preset);
     this.onPresetChange?.(preset);
@@ -133,16 +170,53 @@ export class CameraController {
 
   /**
    * Toggles or sets auto-rotation.
+   * During a command transition auto-orbit is suspended; the request is remembered and
+   * applied when the transition ends, so gesture pause/restore logic stays correct.
    */
   public setAutoRotate(enabled: boolean): void {
+    if (this.transition) {
+      this.transition.restoreAutoRotate = enabled;
+      return;
+    }
     this.controls.autoRotate = enabled;
   }
 
   /**
-   * Gets current auto-rotate state.
+   * Gets the intended auto-rotate state (including while a transition temporarily suspends it).
    */
   public isAutoRotating(): boolean {
-    return this.controls.autoRotate;
+    return this.transition ? this.transition.restoreAutoRotate : this.controls.autoRotate;
+  }
+
+  /**
+   * Task V3: names the view the camera is actually looking from (by viewing direction, within
+   * `toleranceDeg`), or 'custom' after free orbiting. Unlike getActivePreset() this never goes
+   * stale when the user drags the camera. Uses the transition goal while a transition runs.
+   */
+  public classifyView(toleranceDeg = 10): CameraView | 'custom' {
+    const pose = this.getGoalPose();
+    const dir = new THREE.Vector3().subVectors(pose.position, pose.target);
+    if (dir.lengthSq() < 1e-9) return 'custom';
+    dir.normalize();
+    const candidates: [CameraView, THREE.Vector3][] = [
+      ...(Object.keys(CAMERA_PRESETS) as CameraPreset[]).map(
+        (p) => [p, new THREE.Vector3().subVectors(CAMERA_PRESETS[p].position, CAMERA_PRESETS[p].target).normalize()] as [CameraView, THREE.Vector3]
+      ),
+      ...(Object.keys(SIDE_VIEW_DIRECTIONS) as ('back' | 'left' | 'right')[]).map(
+        (v) => [v, SIDE_VIEW_DIRECTIONS[v]] as [CameraView, THREE.Vector3]
+      ),
+    ];
+    const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
+    let best: CameraView | 'custom' = 'custom';
+    let bestDot = cosTol;
+    for (const [view, v] of candidates) {
+      const d = dir.dot(v);
+      if (d >= bestDot) {
+        bestDot = d;
+        best = view;
+      }
+    }
+    return best;
   }
 
   /**
@@ -153,10 +227,160 @@ export class CameraController {
   }
 
   /**
-   * Must be called in the render loop to update damping and auto-rotation.
+   * Must be called in the render loop to update damping, auto-rotation and any
+   * command-driven transition. `now` (ms) is injectable for deterministic tests.
    */
-  public update(): void {
+  public update(now: number = nowMs()): void {
+    if (this.transition) this.stepTransition(now);
     this.controls.update();
+  }
+
+  /* ---------------- Smooth, command-driven camera motion (Task V1) ---------------- */
+
+  /** True while a command-driven transition is animating. */
+  public isTransitioning(): boolean {
+    return this.transition !== null;
+  }
+
+  /**
+   * Stops a running transition where it is (the user took over) and restores auto-orbit intent.
+   */
+  public cancelTransition(): void {
+    if (!this.transition) return;
+    const restore = this.transition.restoreAutoRotate;
+    this.transition = null;
+    this.controls.autoRotate = restore;
+  }
+
+  /** The pose the camera is heading to (end of a running transition) or its current pose. */
+  public getGoalPose(): CameraPose {
+    if (this.transition) {
+      const t = this.transition;
+      return {
+        target: t.toTarget.clone(),
+        position: new THREE.Vector3().setFromSpherical(t.toSph).add(t.toTarget),
+      };
+    }
+    return { position: this.camera.position.clone(), target: this.controls.target.clone() };
+  }
+
+  /**
+   * Smoothly moves camera and target to a pose. Interpolates in spherical coordinates around the
+   * target so the camera arcs around the model instead of cutting through it. Distance and
+   * elevation are clamped to the controls' limits. durationMs <= 0 jumps immediately.
+   */
+  public animateTo(position: THREE.Vector3, target: THREE.Vector3, durationMs = DEFAULT_TRANSITION_MS, now = nowMs()): void {
+    const restoreAutoRotate = this.isAutoRotating();
+    const fromTarget = this.controls.target.clone();
+    const fromSph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(this.camera.position, fromTarget));
+    const toSph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(position, target));
+    toSph.radius = THREE.MathUtils.clamp(toSph.radius, this.controls.minDistance, this.controls.maxDistance);
+    // Tiny lower bound only avoids the pole singularity; the top preset itself sits at ~1.3e-4 rad
+    toSph.phi = THREE.MathUtils.clamp(toSph.phi, 1e-4, this.controls.maxPolarAngle);
+    // Take the shortest way around
+    let dTheta = toSph.theta - fromSph.theta;
+    dTheta = Math.atan2(Math.sin(dTheta), Math.cos(dTheta));
+    toSph.theta = fromSph.theta + dTheta;
+
+    this.controls.autoRotate = false;
+    this.transition = {
+      startMs: now,
+      durationMs: Math.max(0, durationMs),
+      fromTarget,
+      toTarget: target.clone(),
+      fromSph,
+      toSph,
+      restoreAutoRotate,
+    };
+    if (durationMs <= 0) this.stepTransition(now);
+  }
+
+  private stepTransition(now: number): void {
+    const t = this.transition;
+    if (!t) return;
+    const raw = t.durationMs === 0 ? 1 : THREE.MathUtils.clamp((now - t.startMs) / t.durationMs, 0, 1);
+    const e = easeInOutCubic(raw);
+    this.controls.target.lerpVectors(t.fromTarget, t.toTarget, e);
+    const sph = new THREE.Spherical(
+      THREE.MathUtils.lerp(t.fromSph.radius, t.toSph.radius, e),
+      THREE.MathUtils.lerp(t.fromSph.phi, t.toSph.phi, e),
+      THREE.MathUtils.lerp(t.fromSph.theta, t.toSph.theta, e)
+    );
+    this.camera.position.setFromSpherical(sph).add(this.controls.target);
+    this.camera.lookAt(this.controls.target);
+    if (raw >= 1) {
+      this.transition = null;
+      this.controls.autoRotate = t.restoreAutoRotate;
+    }
+  }
+
+  /** Orbits around the target. Positive yaw orbits counter-clockwise seen from above;
+   *  positive pitch raises the camera. Builds on the goal pose so repeated commands accumulate. */
+  public orbitBy(yawRad: number, pitchRad: number, durationMs = DEFAULT_TRANSITION_MS, now = nowMs()): void {
+    const goal = this.getGoalPose();
+    const sph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(goal.position, goal.target));
+    sph.theta += yawRad;
+    sph.phi = THREE.MathUtils.clamp(sph.phi - pitchRad, 0.05, this.controls.maxPolarAngle);
+    this.animateTo(new THREE.Vector3().setFromSpherical(sph).add(goal.target), goal.target, durationMs, now);
+  }
+
+  /** Slides camera and target together in screen space. Amounts are fractions of the viewing
+   *  distance (+right, +up). The target is kept within reach of the model. */
+  public panBy(rightFraction: number, upFraction: number, durationMs = DEFAULT_TRANSITION_MS, now = nowMs()): void {
+    const goal = this.getGoalPose();
+    const offset = new THREE.Vector3().subVectors(goal.position, goal.target);
+    const dist = offset.length();
+    const forward = offset.clone().negate().normalize();
+    const right = new THREE.Vector3().crossVectors(forward, this.camera.up).normalize();
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0); // looking straight down
+    const up = new THREE.Vector3().crossVectors(right, forward).normalize();
+    const delta = right.multiplyScalar(rightFraction * dist).add(up.multiplyScalar(upFraction * dist));
+    const newTarget = goal.target.clone().add(delta);
+    const limit = this.controls.maxDistance * 0.4;
+    if (newTarget.length() > limit) newTarget.setLength(limit);
+    this.animateTo(newTarget.clone().add(offset), newTarget, durationMs, now);
+  }
+
+  /** Multiplies the viewing distance by `factor` (< 1 zooms in), clamped to the limits. */
+  public zoomSmooth(factor: number, durationMs = DEFAULT_TRANSITION_MS, now = nowMs()): void {
+    const goal = this.getGoalPose();
+    const offset = new THREE.Vector3().subVectors(goal.position, goal.target);
+    offset.setLength(THREE.MathUtils.clamp(offset.length() * factor, this.controls.minDistance, this.controls.maxDistance));
+    this.animateTo(goal.target.clone().add(offset), goal.target, durationMs, now);
+  }
+
+  /** Smoothly moves to a named view. Presets use their fixed poses (as the toolbar does);
+   *  back/left/right keep the current target and distance. */
+  public goToView(view: CameraView, durationMs = DEFAULT_TRANSITION_MS, now = nowMs()): void {
+    if (view === 'isometric' || view === 'top' || view === 'front') {
+      const config = CAMERA_PRESETS[view];
+      this.activePreset = view;
+      this.animateTo(config.position, config.target, durationMs, now);
+    } else {
+      const goal = this.getGoalPose();
+      const dist = goal.position.distanceTo(goal.target);
+      const position = goal.target.clone().addScaledVector(SIDE_VIEW_DIRECTIONS[view], dist);
+      this.animateTo(position, goal.target, durationMs, now);
+    }
+    this.onPresetChange?.(view);
+  }
+
+  /** Pose that frames a bounding box (same framing maths as focusOnBounds). */
+  public getFocusPose(box: THREE.Box3, offsetRatio = 1.6): CameraPose | null {
+    if (box.isEmpty()) return null;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 0.1);
+    const fovRad = (this.camera.fov * Math.PI) / 180;
+    const cameraDistance = THREE.MathUtils.clamp(
+      (maxDim / 2 / Math.tan(fovRad / 2)) * offsetRatio,
+      this.controls.minDistance,
+      this.controls.maxDistance
+    );
+    const goal = this.getGoalPose();
+    const direction = new THREE.Vector3().subVectors(goal.position, goal.target).normalize();
+    if (direction.lengthSq() < 1e-4) direction.set(0.7, 0.5, 0.7).normalize();
+    return { target: center, position: center.clone().addScaledVector(direction, cameraDistance) };
   }
 
   /**

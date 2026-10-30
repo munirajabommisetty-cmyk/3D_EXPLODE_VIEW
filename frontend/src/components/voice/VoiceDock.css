@@ -1,0 +1,238 @@
+/* VoiceDock — floating voice tutor, bottom-right of the 3D viewport (UI pass).
+   A compact bar (animated orb + state) is always visible; the conversation panel opens upward
+   above it when there is something to show. The webcam chip sits just above the dock.
+   Orb states: idle (soft breathing), listening (waves follow the live microphone level, rings
+   pulse), thinking (spinning ring), speaking (flowing waves + outward ripples). */
+.voice-dock {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 30;
+  width: min(380px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--cad-text-primary, #e2e8f0);
+  font-family: var(--cad-font-sans, inherit);
+  font-size: 13px;
+  pointer-events: none; /* only the bar and the panel take clicks */
+}
+.voice-dock.collapsed { width: min(320px, calc(100% - 32px)); }
+
+.voice-dock-row,
+.voice-dock-body {
+  pointer-events: auto;
+  background: linear-gradient(160deg, rgba(23, 33, 56, 0.9), rgba(13, 19, 34, 0.92));
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 18px;
+  box-shadow: 0 14px 36px rgba(2, 6, 23, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.voice-dock-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 10px; }
+.voice-dock-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.voice-bar-lang .voice-lang { width: 100%; }
+
+/* ---------------- Orb ---------------- */
+.voice-orb {
+  --voice-level: 0;
+  --orb-a: #38bdf8;
+  --orb-b: #818cf8;
+  position: relative;
+  flex: none;
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  border: none;
+  color: #fff;
+  background: radial-gradient(circle at 35% 30%, #a5f3fc 0%, var(--orb-a) 38%, var(--orb-b) 100%);
+  display: grid; place-items: center;
+  cursor: pointer;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset, 0 6px 20px rgba(56, 189, 248, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.3s ease;
+  animation: orb-breathe 3.2s ease-in-out infinite;
+}
+.voice-orb svg { width: 22px; height: 22px; position: relative; z-index: 2; }
+.voice-orb:hover:not(:disabled) { transform: scale(1.06); }
+.voice-orb:focus-visible { outline: 2px solid #67e8f9; outline-offset: 3px; }
+.voice-orb:disabled { cursor: wait; }
+
+.orb-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid var(--orb-a);
+  opacity: 0; pointer-events: none;
+}
+
+/* Listening: warm gradient, rings scale with the live level, bars follow the voice */
+.orb-listening .voice-orb {
+  --orb-a: #fb7185; --orb-b: #f472b6;
+  background: radial-gradient(circle at 35% 30%, #fecdd3 0%, var(--orb-a) 40%, var(--orb-b) 100%);
+  animation: none;
+  box-shadow: 0 0 0 calc(3px + var(--voice-level) * 14px) rgba(251, 113, 133, 0.22), 0 6px 22px rgba(244, 114, 182, 0.45);
+}
+.orb-listening .orb-ring-1 { animation: orb-ripple 1.6s ease-out infinite; }
+.orb-listening .orb-ring-2 { animation: orb-ripple 1.6s ease-out 0.8s infinite; }
+
+/* Speaking: cool gradient, ripples flow outward */
+.orb-speaking .voice-orb {
+  --orb-a: #34d399; --orb-b: #38bdf8;
+  background: radial-gradient(circle at 35% 30%, #d1fae5 0%, var(--orb-a) 40%, var(--orb-b) 100%);
+  animation: none;
+}
+.orb-speaking .orb-ring-1 { animation: orb-ripple 2s ease-out infinite; }
+.orb-speaking .orb-ring-2 { animation: orb-ripple 2s ease-out 1s infinite; }
+
+/* Thinking: a spinning arc around the orb */
+.orb-thinking .voice-orb { animation: none; --orb-a: #a78bfa; --orb-b: #60a5fa; }
+.orb-thinking .orb-ring-1 {
+  opacity: 1; inset: -5px; border-width: 3px;
+  border-color: rgba(167, 139, 250, 0.15);
+  border-top-color: #c4b5fd; border-right-color: #93c5fd;
+  animation: orb-spin 0.9s linear infinite;
+}
+
+/* Wave bars (listening = driven by --voice-level; speaking = flowing animation) */
+.orb-wave { display: flex; align-items: center; gap: 3px; height: 24px; position: relative; z-index: 2; }
+.orb-wave i {
+  display: block; width: 4px; border-radius: 3px; background: #fff;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.7);
+  height: calc(5px + var(--voice-level) * 19px * var(--k));
+  transition: height 70ms linear;
+}
+.orb-listening .orb-wave i { animation: wave-jitter 0.45s ease-in-out infinite alternate; animation-delay: calc(var(--i) * -0.09s); }
+.orb-speaking .orb-wave i {
+  height: calc(6px + 16px * var(--k));
+  animation: wave-flow 0.9s ease-in-out infinite; animation-delay: calc(var(--i) * 0.12s);
+}
+
+@keyframes orb-breathe { 0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,0.18) inset, 0 6px 18px rgba(56,189,248,0.3); } 50% { box-shadow: 0 0 0 1px rgba(255,255,255,0.22) inset, 0 6px 28px rgba(129,140,248,0.55); } }
+@keyframes orb-ripple { from { transform: scale(1); opacity: 0.75; } to { transform: scale(1.9); opacity: 0; } }
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+@keyframes wave-jitter { from { transform: scaleY(0.75); } to { transform: scaleY(1.15); } }
+@keyframes wave-flow { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+
+/* ---------------- Bar text and controls ---------------- */
+.voice-title { font-weight: 600; letter-spacing: 0.02em; }
+.voice-status { display: flex; align-items: center; gap: 6px; color: #cbd5e1; font-size: 12.5px; line-height: 1.35; }
+.voice-state-icon { width: 14px; text-align: center; }
+.voice-lang {
+  min-width: 0;
+  background: rgba(15, 23, 42, 0.7);
+  color: inherit;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  padding: 3px 6px;
+  font: inherit; font-size: 12px;
+}
+.voice-collapse, .voice-cancel {
+  flex: none;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #cbd5e1; cursor: pointer; font-size: 12px;
+  display: grid; place-items: center;
+}
+.voice-cancel:hover { border-color: #f87171; color: #fecaca; }
+.voice-collapse:hover { border-color: #67e8f9; }
+.voice-cancel:focus-visible, .voice-collapse:focus-visible, .voice-lang:focus-visible {
+  outline: 2px solid #22d3ee; outline-offset: 2px;
+}
+
+/* ---------------- Conversation panel ---------------- */
+.voice-dock-body {
+  padding: 12px; display: grid; gap: 9px;
+  max-height: min(56vh, 520px); overflow-y: auto;
+  animation: panel-rise 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.voice-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+@keyframes panel-rise { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+.voice-beta, .voice-notice { border-radius: 10px; padding: 7px 9px; font-size: 12px; line-height: 1.45; }
+.voice-beta { background: rgba(245, 158, 11, 0.12); color: #fbbf24; }
+.voice-notice { background: rgba(239, 68, 68, 0.12); color: #fca5a5; }
+
+/* Chat-like bubbles that slide in */
+.voice-transcript, .voice-caption { animation: bubble-in 0.28s cubic-bezier(0.16, 1, 0.3, 1); }
+.voice-transcript {
+  justify-self: end; max-width: 92%;
+  padding: 7px 10px; border-radius: 14px 14px 4px 14px;
+  background: rgba(56, 189, 248, 0.14); color: #e0f2fe; line-height: 1.45; overflow-wrap: anywhere;
+}
+.voice-transcript span, .voice-topic span, .voice-examples span, .teach-question span, .teach-followups span {
+  display: block; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+  color: #64748b; margin-bottom: 2px;
+}
+.voice-caption {
+  display: grid; gap: 4px; padding: 9px 11px; border-radius: 14px 14px 14px 4px; line-height: 1.5;
+  background: rgba(148, 163, 184, 0.1); overflow-wrap: anywhere; font-size: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+@keyframes bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.orb-speaking .voice-caption { border-color: rgba(52, 211, 153, 0.45); box-shadow: 0 0 18px rgba(52, 211, 153, 0.12); }
+
+.voice-chip { font-size: 11px; font-weight: 600; }
+.chip-executed .voice-chip { color: #4ade80; }
+.chip-deferred .voice-chip { color: #fbbf24; }
+.chip-rejected .voice-chip, .chip-error .voice-chip { color: #f87171; }
+.chip-needsInput .voice-chip { color: #67e8f9; }
+.chip-answered .voice-chip { color: #22d3ee; }
+.chip-unavailable .voice-chip { color: #fbbf24; }
+.chip-cancelled .voice-chip { color: #94a3b8; }
+.voice-toggle { display: flex; gap: 6px; align-items: center; font-size: 11px; color: #94a3b8; cursor: pointer; }
+
+.voice-topic { display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 600; }
+.voice-topic span { display: inline; margin: 0; }
+.voice-examples { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+.voice-examples span { width: 100%; }
+.voice-examples q {
+  quotes: '“' '”'; padding: 4px 9px; border-radius: 999px;
+  background: rgba(148, 163, 184, 0.1); color: #cbd5e1;
+}
+
+/* Teaching panel (Task V4) */
+.teach-panel {
+  display: grid; gap: 7px; padding: 10px; border-radius: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.06);
+  animation: bubble-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.teach-question { color: #cbd5e1; overflow-wrap: anywhere; }
+.teach-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+.teach-title { font-size: 13px; }
+.teach-progress { flex: none; font-size: 11px; color: #67e8f9; }
+.teach-status { font-size: 12px; color: #94a3b8; }
+.teach-step { display: grid; gap: 4px; animation: bubble-in 0.3s ease; }
+.teach-caption { font-weight: 600; }
+.teach-narration { line-height: 1.55; color: #e2e8f0; overflow-wrap: anywhere; }
+.teach-claim {
+  justify-self: start; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14); color: #cbd5e1;
+}
+.teach-claim.claim-visible { color: #4ade80; }
+.teach-claim.claim-notSimulated { color: #fbbf24; }
+.teach-limit, .teach-message, .teach-rejected { font-size: 12px; line-height: 1.45; color: #fbbf24; }
+.teach-error { font-size: 12px; line-height: 1.45; color: #fca5a5; }
+.teach-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.teach-controls button {
+  background: rgba(148, 163, 184, 0.08); color: inherit; font: inherit; font-size: 12px; cursor: pointer;
+  border: 1px solid rgba(148, 163, 184, 0.3); border-radius: 999px; padding: 4px 11px;
+}
+.teach-controls button:hover { border-color: #22d3ee; }
+.teach-followups { font-size: 12px; color: #cbd5e1; }
+
+/* State accents on the bar (always paired with the text label, never colour alone) */
+.voice-dock.state-listening .voice-dock-row { border-color: rgba(251, 113, 133, 0.55); }
+.voice-dock.state-speaking .voice-dock-row { border-color: rgba(52, 211, 153, 0.5); }
+.voice-dock.state-processing .voice-dock-row { border-color: rgba(167, 139, 250, 0.5); }
+.voice-dock.state-interrupted .voice-dock-row { border-color: rgba(245, 158, 11, 0.55); }
+.voice-dock.state-error .voice-dock-row { border-color: rgba(239, 68, 68, 0.5); }
+
+@media (max-width: 640px) {
+  .voice-dock { right: 8px; bottom: 8px; width: calc(100% - 16px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb, .orb-ring, .orb-wave i, .voice-dock-body, .voice-transcript, .voice-caption, .teach-panel, .teach-step { animation: none !important; }
+}
+
+/* Product pass: the tutor panel never grows over most of the model; it scrolls instead */
+.voice-dock-body { max-height: min(58vh, 520px); overflow-y: auto; }

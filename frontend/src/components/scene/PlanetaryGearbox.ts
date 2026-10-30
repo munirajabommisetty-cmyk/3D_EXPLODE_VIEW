@@ -9,14 +9,37 @@ export interface PlanetaryGearboxController {
 }
 
 /**
- * Creates an individual gear mesh with a central hub, bore, and radial teeth.
+ * Toothed outline (trapezoid teeth) as a closed path: rRoot = tooth root, rTip = tooth tip. For an
+ * internal gear rTip < rRoot (teeth point inwards).
+ */
+function toothedOutline(path: THREE.Path, toothCount: number, rRoot: number, rTip: number, phase = 0): void {
+  const p = (Math.PI * 2) / toothCount;
+  const pt = (r: number, a: number) => [Math.cos(a) * r, Math.sin(a) * r] as const;
+  for (let i = 0; i < toothCount; i++) {
+    const c = phase + i * p;
+    const pts = [pt(rRoot, c - 0.27 * p), pt(rTip, c - 0.13 * p), pt(rTip, c + 0.13 * p), pt(rRoot, c + 0.27 * p)];
+    pts.forEach(([x, y], k) => (i === 0 && k === 0 ? path.moveTo(x, y) : path.lineTo(x, y)));
+  }
+  path.closePath();
+}
+
+/** Extrudes a flat gear shape into a body of the given height, centred on y = 0 (axis along y). */
+function gearBody(shape: THREE.Shape, height: number): THREE.ExtrudeGeometry {
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, curveSegments: 48 });
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(0, -height / 2, 0);
+  return geo;
+}
+
+/**
+ * Creates a spur gear: one body with a true toothed outline and an axle bore, plus a raised hub.
+ * Drawn as a clean technical outline in the x-ray look.
  */
 function createSpurGear({
   radius,
   height,
   toothCount,
   toothDepth,
-  toothWidth,
   material,
   componentId,
 }: {
@@ -32,45 +55,29 @@ function createSpurGear({
   gearGroup.name = componentId;
   gearGroup.userData = { componentId };
 
-  // 1. Central Gear Hub
-  const hubGeo = new THREE.CylinderGeometry(radius, radius, height, 36);
-  const hubMesh = new THREE.Mesh(hubGeo, material);
-  hubMesh.name = `${componentId}_hub`;
-  hubMesh.userData = { componentId };
-  gearGroup.add(hubMesh);
+  // 1. Gear body: toothed rim with the axle bore cut through
+  const shape = new THREE.Shape();
+  toothedOutline(shape, toothCount, radius, radius + toothDepth * 0.9);
+  const bore = new THREE.Path();
+  bore.absarc(0, 0, radius * 0.28, 0, Math.PI * 2, true);
+  shape.holes.push(bore);
+  const body = new THREE.Mesh(gearBody(shape, height * 0.96), material);
+  body.name = `${componentId}_hub`;
+  body.userData = { componentId };
+  gearGroup.add(body);
 
-  // 2. Center Axle Bore Hole (dark inner cylinder for contrast)
-  const boreGeo = new THREE.CylinderGeometry(radius * 0.28, radius * 0.28, height * 1.02, 24);
-  const boreMat = new THREE.MeshStandardMaterial({
-    color: 0x111827,
-    metalness: 0.9,
-    roughness: 0.6,
-  });
-  const boreMesh = new THREE.Mesh(boreGeo, boreMat);
-  boreMesh.name = `${componentId}_bore`;
-  boreMesh.userData = { componentId };
-  gearGroup.add(boreMesh);
-
-  // 3. Radial Gear Teeth
-  const toothGeo = new THREE.BoxGeometry(toothWidth, height * 0.96, toothDepth);
-  for (let i = 0; i < toothCount; i++) {
-    const angle = (i / toothCount) * Math.PI * 2;
-    const toothMesh = new THREE.Mesh(toothGeo, material);
-    // Position tooth at outer pitch radius
-    const posX = Math.sin(angle) * (radius + toothDepth * 0.4);
-    const posZ = Math.cos(angle) * (radius + toothDepth * 0.4);
-    toothMesh.position.set(posX, 0, posZ);
-    toothMesh.rotation.y = angle;
-    toothMesh.name = `${componentId}_tooth_${i}`;
-    toothMesh.userData = { componentId };
-    gearGroup.add(toothMesh);
-  }
+  // 2. Raised hub around the bore
+  const hubGeo = new THREE.CylinderGeometry(radius * 0.45, radius * 0.45, height * 1.15, 32, 1, true);
+  const hub = new THREE.Mesh(hubGeo, material);
+  hub.name = `${componentId}_boss`;
+  hub.userData = { componentId };
+  gearGroup.add(hub);
 
   return gearGroup;
 }
 
 /**
- * Creates the outer Ring Gear (Annulus) with internal-facing teeth.
+ * Creates the outer Ring Gear (Annulus): one body whose inner edge carries the internal teeth.
  */
 function createRingGear({
   innerRadius,
@@ -91,45 +98,26 @@ function createRingGear({
   ringGroup.name = componentId;
   ringGroup.userData = { componentId };
 
-  // Outer cylindrical casing using CylinderGeometry
-  // Approximate hollow cylinder with outer wall and top/bottom bevel rings
-  const outerWallGeo = new THREE.CylinderGeometry(outerRadius, outerRadius, height, 48, 1, true);
-  const outerWallMesh = new THREE.Mesh(outerWallGeo, material);
-  outerWallMesh.name = `${componentId}_outer_wall`;
-  outerWallMesh.userData = { componentId };
-  ringGroup.add(outerWallMesh);
+  // Annulus: round outside, internal teeth pointing towards the centre
+  const shape = new THREE.Shape();
+  shape.absarc(0, 0, outerRadius, 0, Math.PI * 2, false);
+  const teeth = new THREE.Path();
+  toothedOutline(teeth, toothCount, innerRadius + 0.12, innerRadius - 0.03);
+  shape.holes.push(teeth);
+  const body = new THREE.Mesh(gearBody(shape, height), material);
+  body.name = `${componentId}_outer_wall`;
+  body.userData = { componentId };
+  ringGroup.add(body);
 
-  // Flange rings on top and bottom for realistic machined casing look
-  const flangeGeo = new THREE.TorusGeometry(outerRadius, 0.08, 16, 48);
-  const topFlange = new THREE.Mesh(flangeGeo, material);
-  topFlange.rotation.x = Math.PI / 2;
-  topFlange.position.y = height / 2;
-  topFlange.name = `${componentId}_top_flange`;
-  topFlange.userData = { componentId };
-  ringGroup.add(topFlange);
-
-  const bottomFlange = new THREE.Mesh(flangeGeo, material);
-  bottomFlange.rotation.x = Math.PI / 2;
-  bottomFlange.position.y = -height / 2;
-  bottomFlange.name = `${componentId}_bottom_flange`;
-  bottomFlange.userData = { componentId };
-  ringGroup.add(bottomFlange);
-
-  // Internal teeth pointing inwards towards assembly center
-  const toothDepth = 0.14;
-  const toothWidth = 0.09;
-  const toothGeo = new THREE.BoxGeometry(toothWidth, height * 0.92, toothDepth);
-  for (let i = 0; i < toothCount; i++) {
-    const angle = (i / toothCount) * Math.PI * 2;
-    const toothMesh = new THREE.Mesh(toothGeo, material);
-    // Position tooth along inner perimeter pointing inward
-    const posX = Math.sin(angle) * (innerRadius + toothDepth * 0.4);
-    const posZ = Math.cos(angle) * (innerRadius + toothDepth * 0.4);
-    toothMesh.position.set(posX, 0, posZ);
-    toothMesh.rotation.y = angle;
-    toothMesh.name = `${componentId}_internal_tooth_${i}`;
-    toothMesh.userData = { componentId };
-    ringGroup.add(toothMesh);
+  // Flange rings on top and bottom for a machined casing look
+  const flangeGeo = new THREE.TorusGeometry(outerRadius, 0.06, 8, 64);
+  for (const [name, y] of [['top', height / 2], ['bottom', -height / 2]] as const) {
+    const flange = new THREE.Mesh(flangeGeo, material);
+    flange.rotation.x = Math.PI / 2;
+    flange.position.y = y;
+    flange.name = `${componentId}_${name}_flange`;
+    flange.userData = { componentId };
+    ringGroup.add(flange);
   }
 
   // Radial mounting brackets on outer rim for realistic engineering housing
@@ -249,40 +237,17 @@ export function buildPlanetaryGearbox(): PlanetaryGearboxController {
   // -------------------------------------------------------------
   // Coordinated PBR Materials (Standard & Physical Materials)
   // -------------------------------------------------------------
-  // 1. Sun Gear: Machined Brass / Gold
-  const sunMaterial = new THREE.MeshStandardMaterial({
-    color: 0xd4af37,
-    metalness: 0.86,
-    roughness: 0.26,
-  });
-
-  // 2. Planet Gears: Carburized High-Finish Steel
-  const planetMaterial = new THREE.MeshStandardMaterial({
-    color: 0x94a3b8,
-    metalness: 0.92,
-    roughness: 0.18,
-  });
-
-  // 3. Ring Gear: Gunmetal Anodized Housing
-  const ringMaterial = new THREE.MeshStandardMaterial({
-    color: 0x334155,
-    metalness: 0.80,
-    roughness: 0.36,
-  });
-
-  // 4. Planet Carrier: Dark Cast Structural Iron
-  const carrierMaterial = new THREE.MeshStandardMaterial({
-    color: 0x1e293b,
-    metalness: 0.65,
-    roughness: 0.48,
-  });
-
-  // 5. Central / Pin Hardened Steel
-  const shaftMaterial = new THREE.MeshStandardMaterial({
-    color: 0x64748b,
-    metalness: 0.88,
-    roughness: 0.22,
-  });
+  // Realistic finishes, as on a real gearbox (the exploded view adds colour-coding on top):
+  // 1. Sun gear: case-hardened steel
+  const sunMaterial = new THREE.MeshStandardMaterial({ color: 0xc3c7cc, metalness: 1, roughness: 0.28 });
+  // 2. Planet gears: ground steel (slightly darker, so the sun gear still reads as a separate part)
+  const planetMaterial = new THREE.MeshStandardMaterial({ color: 0xa7acb3, metalness: 1, roughness: 0.34 });
+  // 3. Ring gear: cast-iron housing
+  const ringMaterial = new THREE.MeshStandardMaterial({ color: 0x5b6169, metalness: 0.75, roughness: 0.52 });
+  // 4. Planet carrier: machined aluminium
+  const carrierMaterial = new THREE.MeshStandardMaterial({ color: 0xcfd3d8, metalness: 0.95, roughness: 0.22 });
+  // 5. Shaft and pins: polished steel
+  const shaftMaterial = new THREE.MeshStandardMaterial({ color: 0xe0e3e7, metalness: 1, roughness: 0.14 });
 
   // -------------------------------------------------------------
   // Mechanical Geometry Proportions

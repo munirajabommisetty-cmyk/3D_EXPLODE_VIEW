@@ -87,6 +87,8 @@ export interface ComponentRaycasterOptions {
   hoverIntensity?: number;
   selectedColor?: number;
   selectedIntensity?: number;
+  relatedColor?: number;
+  relatedIntensity?: number;
   validComponentIds?: ReadonlySet<string> | readonly string[];
   isValidComponentId?: (id: string) => boolean;
 }
@@ -96,6 +98,8 @@ export const DEFAULT_RAYCASTER_OPTIONS = {
   hoverIntensity: 0.55,
   selectedColor: 0xf59e0b, // Amber / warm gold active selection glow
   selectedIntensity: 0.85,
+  relatedColor: 0x22c55e, // Green glow for components related to the selection (Task V3)
+  relatedIntensity: 0.5,
 };
 
 /**
@@ -109,6 +113,8 @@ export class ComponentRaycaster {
 
   private activeHoveredId: string | null = null;
   private activeSelectedId: string | null = null;
+  /** Task V3: components highlighted together (e.g. parts connected to the selected one). */
+  private relatedIds = new Set<string>();
   private readonly validator?: (id: string) => boolean;
 
   // Tracks meshes currently modified by highlighting
@@ -148,7 +154,9 @@ export class ComponentRaycaster {
     const intersects = this.raycaster.intersectObjects(this.rootObject.children, true);
 
     for (const hit of intersects) {
-      if ((hit.object as THREE.Mesh).isMesh) {
+      // three.js raycasting ignores visibility: hidden parts (or parts under a hidden parent, e.g.
+      // the brain's outer cortex in the inside view) must not be picked through
+      if ((hit.object as THREE.Mesh).isMesh && isShown(hit.object)) {
         const componentId = resolveComponentId(hit.object, this.validator);
         if (componentId) {
           return {
@@ -170,22 +178,10 @@ export class ComponentRaycaster {
    */
   public setHoverHighlight(componentId: string | null): void {
     if (this.activeHoveredId === componentId) return;
-
-    // If an existing hover was active and it's not the currently selected component, clear it
-    if (this.activeHoveredId && this.activeHoveredId !== this.activeSelectedId) {
-      this.clearComponentHighlight(this.activeHoveredId);
-    }
-
+    const previous = this.activeHoveredId;
     this.activeHoveredId = componentId;
-
-    // Apply hover glow if it's not currently selected (selection takes priority)
-    if (componentId && componentId !== this.activeSelectedId) {
-      this.applyComponentHighlight(
-        componentId,
-        this.options.hoverColor,
-        this.options.hoverIntensity
-      );
-    }
+    if (previous) this.refreshComponent(previous);
+    if (componentId) this.refreshComponent(componentId);
   }
 
   /**
@@ -194,32 +190,38 @@ export class ComponentRaycaster {
    */
   public setSelectionHighlight(componentId: string | null): void {
     if (this.activeSelectedId === componentId) return;
-
-    // Clear previous selected component highlight
-    if (this.activeSelectedId) {
-      this.clearComponentHighlight(this.activeSelectedId);
-    }
-
+    const previous = this.activeSelectedId;
     this.activeSelectedId = componentId;
+    if (previous) this.refreshComponent(previous);
+    if (componentId) this.refreshComponent(componentId);
+  }
 
-    // If clearing selection, re-apply hover if mouse is still over a component
-    if (!componentId) {
-      if (this.activeHoveredId) {
-        this.applyComponentHighlight(
-          this.activeHoveredId,
-          this.options.hoverColor,
-          this.options.hoverIntensity
-        );
-      }
-      return;
+  /**
+   * Task V3: highlights several components together (a third, lower-priority layer:
+   * selection > hover > related). Passing an empty list clears it, restoring each component's
+   * previous highlight (selection/hover) or its original material.
+   */
+  public setRelatedHighlight(componentIds: readonly string[]): void {
+    const next = new Set(componentIds);
+    const changed = new Set([...this.relatedIds, ...next]);
+    this.relatedIds = next;
+    for (const id of changed) this.refreshComponent(id);
+  }
+
+  public getRelatedHighlightIds(): string[] {
+    return [...this.relatedIds];
+  }
+
+  /** Re-applies the highest-priority highlight layer for one component (or restores it). */
+  private refreshComponent(componentId: string): void {
+    this.clearComponentHighlight(componentId);
+    if (componentId === this.activeSelectedId) {
+      this.applyComponentHighlight(componentId, this.options.selectedColor, this.options.selectedIntensity);
+    } else if (componentId === this.activeHoveredId) {
+      this.applyComponentHighlight(componentId, this.options.hoverColor, this.options.hoverIntensity);
+    } else if (this.relatedIds.has(componentId)) {
+      this.applyComponentHighlight(componentId, this.options.relatedColor, this.options.relatedIntensity);
     }
-
-    // Apply vibrant selection highlight
-    this.applyComponentHighlight(
-      componentId,
-      this.options.selectedColor,
-      this.options.selectedIntensity
-    );
   }
 
   /**
@@ -295,6 +297,7 @@ export class ComponentRaycaster {
     this.highlightedMeshes.clear();
     this.activeHoveredId = null;
     this.activeSelectedId = null;
+    this.relatedIds.clear();
   }
 
   public getActiveHoveredId(): string | null {
@@ -311,3 +314,9 @@ export class ComponentRaycaster {
 }
 
 export default ComponentRaycaster;
+
+/** True when the object and all its ancestors are visible. */
+function isShown(obj: THREE.Object3D): boolean {
+  for (let o: THREE.Object3D | null = obj; o; o = o.parent) if (!o.visible) return false;
+  return true;
+}

@@ -1,124 +1,102 @@
-/* Gesture HUD Badge Styling */
+/* Gesture badge: neutral surface, one accent for a recognised gesture, text states (not colour alone) */
 .gesture-hud-badge {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
-  background: rgba(11, 15, 25, 0.82);
+  gap: var(--gl-space-2);
+  padding: 6px 10px;
+  background: rgba(13, 20, 34, 0.88);
   backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 6px;
-  font-family: monospace, var(--font-mono, monospace);
-  color: #f3f4f6;
-  transition: all 0.2s ease;
+  border: 1px solid var(--gl-border-strong);
+  border-radius: var(--gl-radius-sm);
+  font-family: var(--gl-font);
+  color: var(--gl-text);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
   user-select: none;
 }
 
 .gesture-hud-badge.compact {
-  padding: 3px 8px;
+  padding: 4px 10px;
   gap: 6px;
-  font-size: 0.72rem;
+  min-height: 28px;
+  border-radius: var(--gl-radius-pill);
 }
 
-/* Color states per gesture */
-.gesture-hud-badge.open_palm {
-  border-color: rgba(16, 185, 129, 0.6);
-  background: rgba(16, 185, 129, 0.12);
-  box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
-}
-
-.gesture-hud-badge.open_palm .gesture-name {
-  color: #34d399;
-}
-
-.gesture-hud-badge.pointing {
-  border-color: rgba(6, 182, 212, 0.6);
-  background: rgba(6, 182, 212, 0.12);
-  box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
-}
-
-.gesture-hud-badge.pointing .gesture-name {
-  color: #22d3ee;
-}
-
+.gesture-hud-badge.open_palm,
+.gesture-hud-badge.pointing,
 .gesture-hud-badge.pinch {
-  border-color: rgba(245, 158, 11, 0.6);
-  background: rgba(245, 158, 11, 0.12);
-  box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(56, 189, 248, 0.1);
 }
 
-.gesture-hud-badge.pinch .gesture-name {
-  color: #fbbf24;
-}
-
-.gesture-hud-badge.none {
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(15, 23, 42, 0.6);
-}
-
-.gesture-hud-badge.none .gesture-name {
-  color: #9ca3af;
+.gesture-hud-badge.settling {
+  border-style: dashed;
 }
 
 .gesture-icon {
-  font-size: 1.1rem;
-  line-height: 1;
+  display: inline-flex;
+  color: var(--gl-primary);
 }
 
-.gesture-hud-badge.compact .gesture-icon {
-  font-size: 0.9rem;
+.gesture-hud-badge.none .gesture-icon {
+  color: var(--gl-text-subtle);
 }
 
 .gesture-details {
   display: flex;
   flex-direction: column;
-  line-height: 1.15;
+  line-height: 1.2;
+}
+
+.gesture-hud-badge.compact .gesture-details {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
 }
 
 .gesture-name {
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  font-size: var(--gl-text-xs);
+  font-weight: 600;
+  color: var(--gl-text);
+}
+
+.gesture-hud-badge.none .gesture-name {
+  color: var(--gl-text-muted);
 }
 
 .gesture-meta {
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 0.62rem;
-  color: #9ca3af;
+  font-size: 0.6875rem;
+  color: var(--gl-text-muted);
 }
 
 .gesture-confidence {
+  font-size: 0.6875rem;
   font-weight: 600;
-  color: #e5e7eb;
+  font-variant-numeric: tabular-nums;
+  color: var(--gl-text-muted);
 }
 
 .gesture-stability-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
 }
 
 .gesture-stability-dot.active {
-  background-color: #10b981;
-  box-shadow: 0 0 4px #10b981;
+  background-color: var(--gl-success);
 }
 
 .gesture-stability-dot.pending {
-  background-color: #f59e0b;
-}
-
-.gesture-stability-text {
-  letter-spacing: 0.02em;
+  background-color: var(--gl-warning);
 }
 
 .gesture-settling-text {
-  color: #fbbf24;
+  color: var(--gl-warning);
   font-weight: 600;
 }
 
 .gesture-idle-text {
-  color: #6b7280;
+  color: var(--gl-text-subtle);
 }

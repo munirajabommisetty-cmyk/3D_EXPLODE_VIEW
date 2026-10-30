@@ -217,3 +217,154 @@
     display: none;
   }
 }
+
+/* Milestone C: exploded-view part names (positioned each frame by the render loop) */
+.exploded-label-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 8;
+}
+
+.exploded-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0f172a;
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.18);
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+
+/* Milestone C: two-hand gesture feedback */
+.two-hand-status {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 11;
+  padding: 6px 14px;
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.86);
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  font-size: 0.78rem;
+  pointer-events: none;
+  max-width: calc(100% - 32px);
+  text-align: center;
+}
+
+.two-hand-status.state-pinch_armed {
+  border-color: rgba(34, 211, 238, 0.8);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   UI pass: overlay layout. Bottom-centre = view toolbar; bottom-right = voice tutor (+ webcam chip
+   above it); top-right = expanded webcam preview; top-left = hint + diagnostics.
+   --------------------------------------------------------------------------------------------- */
+.viewport-controls-toolbar {
+  /* Bottom-left, beside (never under) the voice tutor docked bottom-right */
+  right: auto;
+  left: 16px;
+  transform: none;
+  max-width: calc(100% - 420px);
+  flex-wrap: wrap;
+  border-radius: 14px;
+  padding: 4px 6px;
+}
+.two-hand-status { bottom: 72px; }
+.interaction-hint { opacity: 0.85; }
+
+/* Exploded-view labels: light glass chips with the part's colour as an accent */
+.exploded-label {
+  --label-accent: #2f7fd8;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-left: 4px solid var(--label-accent);
+  color: #1e293b;
+  border-radius: 999px;
+  padding: 3px 11px 3px 9px;
+  box-shadow: 0 4px 14px rgba(47, 127, 216, 0.18);
+  transition: opacity 0.2s ease;
+}
+
+@media (max-width: 768px) {
+  .viewport-controls-toolbar { left: 8px; right: 8px; transform: none; border-radius: 14px; max-width: none; }
+}
+
+/* Brain module: asset loading and the licence credit (CC BY) */
+.loading-overlay { gap: 12px; color: #cbd5e1; }
+.model-attribution {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 9;
+  max-width: min(420px, 40%);
+  font-size: 10px;
+  line-height: 1.35;
+  color: rgba(148, 163, 184, 0.85);
+  pointer-events: none;
+}
+@media (max-width: 768px) { .model-attribution { display: none; } }
+
+/* Learning-view note (e.g. load path: illustration only) */
+.overlay-note {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 12;
+  max-width: min(560px, calc(100% - 32px));
+  padding: 7px 14px;
+  border-radius: 12px;
+  background: rgba(255, 247, 237, 0.95);
+  color: #7c2d12;
+  border: 1px solid rgba(234, 88, 12, 0.4);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+}
+.toolbar-select { padding-right: 6px; }
+
+/* X-ray look: callout labels (dark glass chips in the part's colour) and leader lines */
+.callout-leaders {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.callout-leaders path {
+  fill: none;
+  stroke-width: 1.3;
+  stroke-opacity: 0.9;
+}
+.exploded-label {
+  background: rgba(6, 12, 24, 0.86);
+  color: #e6f1ff;
+  border: 1px solid var(--label-accent);
+  border-left: 1px solid var(--label-accent);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--label-accent) 35%, transparent);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Product pass, mobile: the view toolbar sits above the webcam chip and the tutor bar */
+@media (max-width: 768px) {
+  .viewport-controls-toolbar { bottom: 150px; }
+}

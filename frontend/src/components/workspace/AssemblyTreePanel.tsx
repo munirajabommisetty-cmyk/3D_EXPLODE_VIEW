@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
+import { Icon } from '../ui/Icon';
 import type { AssemblyTreeNode } from '../../types/models';
 import {
   getDescendantComponentIds,
@@ -116,7 +117,7 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
             aria-expanded={isExpanded}
           >
             <span className={`caret-icon ${isExpanded ? 'open' : ''}`} aria-hidden="true">
-              ▶
+              <Icon name="chevronRight" size={12} />
             </span>
           </button>
         ) : (
@@ -127,7 +128,7 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
 
         {/* Node Icon */}
         <span className="node-type-icon" aria-hidden="true">
-          {node.type === 'assembly' ? '🗂️' : node.type === 'subassembly' ? '📦' : '⚙️'}
+          <Icon name={node.type === 'assembly' ? 'layers' : node.type === 'subassembly' ? 'box' : 'part'} size={14} />
         </span>
 
         {/* Node Label */}
@@ -154,7 +155,7 @@ const TreeNodeRow: React.FC<TreeNodeRowProps> = ({
           aria-label={isVisible ? `Hide ${node.name} in 3D viewport` : `Show ${node.name} in 3D viewport`}
         >
           <span className="visibility-icon" aria-hidden="true">
-            {isVisible ? '👁' : '⊘'}
+            <Icon name={isVisible ? 'eye' : 'eyeOff'} size={14} />
           </span>
         </button>
       </div>
@@ -270,7 +271,7 @@ export const AssemblyTreePanel: React.FC<AssemblyTreePanelProps> = ({
       {/* 1. Filter Search Bar */}
       <div className="tree-filter-bar">
         <span className="filter-search-icon" aria-hidden="true">
-          🔍
+          <Icon name="search" size={14} />
         </span>
         <input
           type="text"
@@ -288,7 +289,7 @@ export const AssemblyTreePanel: React.FC<AssemblyTreePanelProps> = ({
             title="Clear search filter"
             aria-label="Clear search filter"
           >
-            ✕
+            <Icon name="close" size={14} />
           </button>
         )}
       </div>
@@ -298,7 +299,7 @@ export const AssemblyTreePanel: React.FC<AssemblyTreePanelProps> = ({
         {!rootNode ? (
           <div className="assembly-tree-empty">
             <span className="empty-icon" aria-hidden="true">
-              🗂️
+              <Icon name="layers" size={24} strokeWidth={1.6} />
             </span>
             <p className="empty-title">No Assembly Hierarchy</p>
             <p className="empty-desc">

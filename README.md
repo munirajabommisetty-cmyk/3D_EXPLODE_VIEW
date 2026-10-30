@@ -1,114 +1,242 @@
-# GestureLab: Gesture-Controlled 3D Machine Explorer
+# GestureLab CAD
 
-An interactive engineering-education web app. Learners explore real machines, structures and anatomy in 3D, take them apart with an exploded view, control them with hand gestures from an ordinary webcam, and ask a voice tutor how each part works, in English, Telugu or Hindi.
+### Explore in 3D. Interact with AI. Understand How Things Work.
 
----
+**GestureLab CAD** is an AI-powered, voice-interactive 3D learning and exploration platform designed to make complex concepts easier to explore and understand.
 
+Traditional learning often relies on static diagrams, images, and explanations. However, understanding how individual components connect, interact, and function as part of a larger system can be challenging.
 
-## 🧩 The Problem
+GestureLab CAD addresses this challenge by bringing together **interactive 3D visualization, AI-powered explanations, voice interaction, and gesture-based controls** in one platform.
 
-Engineering and science students learn how machines and structures work mostly from **flat textbook diagrams and static slides**. That creates real gaps:
-
-- **Hard to visualise in 3D.** A planetary gearbox or a steam locomotive is difficult to understand from a 2D cross-section: how parts mesh, move and connect stays abstract.
-- **Physical models are expensive and limited.** Cut-away models and lab equipment are costly, fragile and shared by many students, and most learners never get to take a real machine apart.
-- **CAD tools are built for designers, not learners.** Professional CAD software is costly, complex and explains nothing about *why* a part exists.
-- **Questions go unanswered.** Outside the classroom there is no one to ask "why is this part needed?" or "what happens if it fails?", and help in a student's own language is rare.
-- **Mouse-and-keyboard only.** Demonstrating a model in a classroom, lab or exhibition means standing at a computer instead of interacting naturally.
-
-- 
-
-## 💡 Our Solution
-
-GestureLab turns the browser into a **hands-on 3D engineering lab with a built-in tutor**:
-
-| Problem | How GestureLab solves it |
-| :--- | :--- |
-| Hard to visualise in 3D | Realistic, interactive 3D models you can orbit, zoom and inspect from any angle (Three.js). |
-| Can't take real machines apart | **Exploded view**: every part separates into a colour-coded, see-through X-ray view with labels, then **reassembles** in one click. |
-| CAD tools explain nothing | An **inspector** for every part: its role, specifications, materials and how it connects to other parts, all from the model's own data. |
-| No one to ask | A **voice tutor** that answers spoken questions and explains step by step while it highlights the parts on the model. |
-| Language barrier | Ask and listen in **English, Telugu or Hindi** (Bengali in beta). |
-| Mouse-only interaction | **Touchless hand-gesture control** through a standard webcam: open palm to orbit, pinch to zoom, point and hold to select, and two hands to explode or reassemble. Mouse, keyboard and voice always work too. |
-| Cost and access | Runs in a normal web browser. Hand tracking runs **locally in the browser**, so video never leaves the device. |
+Whether exploring a mechanical gearbox, understanding a suspension bridge, examining a steam engine, or learning about the human eye, users can interact with 3D models and ask questions to gain a clearer understanding of how things work.
 
 ---
 
+## Project Overview
 
-## 🎯 Major Use Cases
+GestureLab CAD aims to transform passive learning into an interactive exploration experience.
 
-### 1. Self-study for engineering students
-A mechanical or civil engineering student opens the planetary gearbox, explodes it, selects the sun gear and asks *"How does it work?"*. The tutor explains step by step while highlighting the gears that mesh with it.
+Instead of simply viewing a diagram or model, users can:
 
-### 2. Classroom and lab demonstrations
-A teacher projects a model and controls it with hand gestures from the front of the room, rotating, zooming and separating the parts without going back to the keyboard.
+* Explore complex structures through interactive 3D models.
+* Rotate, zoom, and inspect individual components.
+* Understand how different components work together.
+* Ask questions naturally using voice interaction.
+* Receive AI-generated explanations.
+* Listen to explanations through text-to-speech.
+* Interact with 3D environments using hand gestures.
 
-### 3. Learning in a regional language
-A student who is more comfortable in Telugu or Hindi asks questions aloud in that language and hears the explanation in the same language.
-
-### 4. Understanding how parts depend on each other
-Using the inspector's relationship view, a learner sees which parts drive, mesh with or support a selected part, and can ask *"What happens if it fails?"*.
-
-### 5. Seeing inside structures and anatomy
-Cutaway and section views reveal hidden internals: the inside of a steam engine, the reinforcement in a concrete frame, or the internal structures of the human eye.
-
-### 6. Exhibitions, museums and science fairs
-A touchless, gesture-driven display lets visitors explore a machine without touching shared hardware.
-
-### 7. Accessible, low-cost access to engineering models
-Schools and colleges without physical cut-away models can give every student the same interactive model on an ordinary laptop with a webcam.
+The platform is designed for students, educators, and curious learners across multiple domains.
 
 ---
 
+## Key Features
 
-## 🧱 Learning Modules
+### 1. Interactive 3D Visualization
 
-| Module | Field | What you can explore |
-| :--- | :--- | :--- |
-| **Epicyclic Planetary Gearbox** | Mechanical | Sun, planet and ring gears, carrier and drive shaft; how gears mesh and transmit power. |
-| **Steam Engine Explorer** | Mechanical | A steam locomotive: boiler, steam circuit, cylinders and moving parts, with animation speed control and a cutaway. |
-| **Reinforced Concrete Structural System Explorer** | Civil | Columns, beams and slabs, a section view, the reinforcement only, and an illustrative load path. |
-| **Warren Truss Bridge** | Civil | Truss members and how the structure carries load. |
-| **Human Eye Explorer** | Anatomy | Real eye structures, with a cutaway to see inside. |
+* Explore detailed 3D models.
+* Rotate, zoom, and inspect structures.
+* Select individual components.
+* Understand the relationships between different parts.
+
+### 2. AI-Powered Explanations
+
+* Ask questions about the displayed 3D models.
+* Receive context-aware AI-generated explanations.
+* Understand complex concepts through natural-language interaction.
+
+### 3. Voice-Based Interaction
+
+GestureLab CAD integrates Gnani AI speech technologies to provide a natural voice interaction experience.
+
+* **Gnani AI Prisma – Speech-to-Text (STT):** Converts spoken questions into text.
+* **Gemini AI – Reasoning and Response Generation:** Processes the transcribed question and generates an explanation.
+* **Gnani AI Timbre – Text-to-Speech (TTS):** Converts the generated explanation into spoken audio.
+
+This creates a voice interaction pipeline that allows users to ask questions and listen to AI-generated responses.
+
+### 4. Gesture-Based Controls
+
+* Interact with 3D models using hand gestures.
+* Detect hand landmarks using MediaPipe.
+* Recognize supported gestures for controlling the 3D environment.
+* Provide an alternative to conventional mouse-based interaction.
+
+### 5. Multi-Domain Exploration
+
+GestureLab CAD is not restricted to mechanical engineering. It supports exploration across different domains.
+
+| Domain                        | Example Models                  |
+| ----------------------------- | ------------------------------- |
+| Mechanical Engineering        | Gearbox and internal mechanisms |
+| Architecture & Infrastructure | Suspension bridge               |
+| Mechanical Systems            | Steam engine                    |
+| Biology & Human Anatomy       | Human eye                       |
 
 ---
 
+## How the AI Voice Interaction Works
 
-## ✨ Key Features
+The voice assistant follows this processing pipeline:
 
-- **Interactive 3D viewer**: realistic materials, view presets (isometric, top, front), auto-rotate, grid and model-specific learning views.
-- **Exploded view and reassembly**: from the toolbar, the **X** key, a voice command or a two-hand gesture.
-- **Hand-gesture control** (MediaPipe Hand Landmarker, 21 landmarks per hand):
-  - **Open palm**: orbit the model
-  - **Pinch**: zoom
-  - **Point and hold**: select a part
-  - **Two hands**: pinch, then spread to explode; pinch again to reassemble
-- **Voice tutor**: speech-to-text, step-by-step teaching plans grounded in the model's own data, and spoken answers. Steps that cannot be shown safely on the model are skipped rather than invented.
-- **Engineering inspector**: overview, specifications, materials and a component relationship map for every part.
-- **Assembly tree**: browse, search, select and hide parts.
-- **One validated command system**: mouse, keyboard, gestures and voice all send the same checked scene commands, so every input method behaves the same way.
-- **Responsive, accessible interface**: works from desktop down to phone width, with keyboard shortcuts, accessible labels and reduced-motion support.
-
----
-
-
-## ⚙️ How It Works
-
+```text
+          User Speaks a Question
+                    |
+                    v
+          Gnani AI Prisma (STT)
+                    |
+                    v
+             Speech to Text
+                    |
+                    v
+              Gemini AI
+        Reasoning & Response Generation
+                    |
+                    v
+          Gnani AI Timbre (TTS)
+                    |
+                    v
+          Generated Speech Audio
+                    |
+                    v
+          User Hears Explanation
 ```
-Webcam ──► MediaPipe hand tracking (in the browser) ──► gesture recognition ──┐
-Mouse / keyboard ─────────────────────────────────────────────────────────────┼──► validated scene commands ──► Three.js 3D viewer
-Microphone ──► FastAPI backend ──► speech-to-text ──► command / question ─────┘
-                                     │
-                                     └──► LLM teaching plan ──► step-by-step explanation + text-to-speech
-```
 
-
-| Layer | Technology |
-| :--- | :--- |
-| Frontend | React 19, TypeScript, Three.js, Vite |
-| Hand tracking | MediaPipe Tasks Vision (runs locally in the browser) |
-| Backend | Python, FastAPI (voice and teaching API) |
-| Speech | Gnani speech-to-text and text-to-speech |
-| Tutor | An OpenAI-compatible LLM endpoint (Gemini by default) |
+The separation of speech recognition, AI reasoning, and speech generation allows each component to perform its specific responsibility.
 
 ---
 
+## Technology Stack
+
+| Component            | Technology      |
+| -------------------- | --------------- |
+| Frontend             | React           |
+| Programming Language | TypeScript      |
+| 3D Visualization     | Three.js        |
+| Hand Tracking        | MediaPipe       |
+| Backend              | Python, FastAPI |
+| AI Reasoning         | Google Gemini   |
+| Speech-to-Text       | Gnani AI Prisma |
+| Text-to-Speech       | Gnani AI Timbre |
+
+---
+
+## System Architecture
+
+At a high level, GestureLab CAD consists of the following components:
+
+```text
+                  USER
+                   |
+          +--------+--------+
+          |                 |
+          v                 v
+     3D Interaction     Voice Input
+          |                 |
+          v                 v
+    React + Three.js   Gnani AI Prisma
+          |                 |
+          |                 v
+          |            FastAPI Backend
+          |                 |
+          |                 v
+          |              Gemini AI
+          |                 |
+          |                 v
+          |           Generated Response
+          |                 |
+          |                 v
+          |           Gnani AI Timbre
+          |                 |
+          +--------+--------+
+                   |
+                   v
+             USER EXPERIENCE
+
+       MediaPipe Hand Tracking
+                   |
+                   v
+          Gesture Recognition
+                   |
+                   v
+           3D Scene Controls
+```
+
+*Conceptual architecture illustrating the major components and their responsibilities.*
+
+---
+
+## Who Can Benefit?
+
+**Students**
+
+* Explore difficult academic concepts visually.
+* Understand complex structures and mechanisms.
+* Clarify doubts through AI-powered assistance.
+
+**Educators**
+
+* Support explanations with interactive 3D models.
+* Demonstrate how components and systems work.
+
+**Curious Learners**
+
+* Explore real-world structures and systems.
+* Learn through visual interaction and natural questions.
+
+---
+
+## Project Vision
+
+Our vision is to make complex concepts easier to explore, understand, and interact with.
+
+By combining 3D visualization, AI-powered explanations, voice technologies, and gesture recognition, GestureLab CAD aims to create a more engaging way to learn about the world around us.
+
+**More than just viewing 3D models — explore, interact, and understand.**
+
+---
+
+## Project Status
+
+GestureLab CAD is an actively developed project.
+
+The platform brings together multiple technologies into a unified interactive learning experience. Features and supported models may evolve as development continues.
+
+---
+
+## Future Scope
+
+Potential areas for further development include:
+
+* Expanding the collection of 3D educational models.
+* Supporting additional domains and subjects.
+* Improving AI explanations and model-specific context.
+* Enhancing gesture recognition and interaction.
+* Improving the overall learning experience and accessibility.
+
+---
+
+## Acknowledgements
+
+This project integrates technologies and tools from:
+
+* Google Gemini
+* Gnani AI – Prisma and Timbre
+* Three.js
+* MediaPipe
+* React
+* FastAPI
+
+---
+
+## Author
+
+**Muniraja**
+
+B.Tech – Artificial Intelligence & Machine Learning
+
+---
+
+### GestureLab CAD
+
+**Explore in 3D. Interact with AI. Understand How Things Work.**

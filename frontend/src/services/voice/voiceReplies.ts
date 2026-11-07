@@ -25,7 +25,9 @@ type ReplyKey =
   | 'VIEWER_NOT_READY' | 'UNKNOWN_COMPONENT' | 'INVALID_ARGUMENT'
   // Voice-conversation milestone: small talk, declined (negated) commands, open questions, service errors
   | 'chatHello' | 'chatHelloName' | 'chatWell' | 'chatThanks' | 'chatBye' | 'chatOffer'
-  | 'declined' | 'teachThinking' | 'serviceBusy' | 'serviceSlow';
+  | 'declined' | 'teachThinking' | 'serviceBusy' | 'serviceSlow'
+  // Voice reliability: speech was heard but no words came back; a lone yes / no with nothing asked
+  | 'heardNoWords' | 'bareReply';
 
 type Phrases = Record<ReplyKey, string>;
 
@@ -51,6 +53,8 @@ const EN: Phrases = {
   questionNoPart: 'Explanations are not available yet.',
   teachPreparing: 'Preparing an explanation of {part}…',
   emptyTranscript: "I didn't catch that. Could you say it again?",
+  heardNoWords: "I heard you, but I couldn't make out the words. Please speak a little closer to the microphone and try again.",
+  bareReply: "There's no question waiting for a yes or no. Ask me about a part, for example: what is this component?",
   noBottomView: 'The camera stays above the ground grid, so there is no bottom view. Try the top or front view.',
   interpreting: 'Let me make sure I understood…',
   unsupportedRequest: "I can't do that in this viewer. You can ask me to explain a part, or to zoom, turn or show a view.",
@@ -110,6 +114,8 @@ const TE: Phrases = {
   questionNoPart: 'వివరణలు ఇంకా అందుబాటులో లేవు.',
   teachPreparing: '{part} వివరణ సిద్ధం చేస్తున్నాను…',
   emptyTranscript: 'నాకు సరిగ్గా వినిపించలేదు. ఇంకోసారి చెప్పగలరా?',
+  heardNoWords: 'మీ గొంతు వినిపించింది, కానీ మాటలు స్పష్టంగా అర్థం కాలేదు. మైక్రోఫోన్‌కి కొంచెం దగ్గరగా మాట్లాడి మళ్లీ ప్రయత్నించండి.',
+  bareReply: 'ఇప్పుడు అవును లేదా కాదు అని చెప్పాల్సిన ప్రశ్న ఏదీ లేదు. ఏదైనా భాగం గురించి అడగండి, ఉదాహరణకు: ఈ భాగం ఏమిటి?',
   noBottomView: 'కెమెరా గ్రౌండ్ గ్రిడ్ పైనే ఉంటుంది, కాబట్టి కింది వ్యూ లేదు. టాప్ లేదా ఫ్రంట్ వ్యూ చూడండి.',
   interpreting: 'మీరు అడిగింది సరిగ్గా అర్థం చేసుకుంటున్నాను…',
   unsupportedRequest: 'ఈ వ్యూయర్‌లో అది చేయలేను. ఒక భాగాన్ని వివరించమని, లేదా జూమ్, తిప్పడం, వ్యూ చూపించమని అడగండి.',
@@ -168,6 +174,8 @@ const HI: Phrases = {
   questionNoPart: 'व्याख्याएँ अभी उपलब्ध नहीं हैं।',
   teachPreparing: '{part} की व्याख्या तैयार कर रही हूँ…',
   emptyTranscript: 'मुझे ठीक से सुनाई नहीं दिया। क्या आप फिर से बोल सकते हैं?',
+  heardNoWords: 'आपकी आवाज़ सुनाई दी, पर शब्द साफ़ समझ नहीं आए। माइक्रोफ़ोन के थोड़ा पास बोलकर फिर से कोशिश कीजिए।',
+  bareReply: 'अभी हाँ या ना वाला कोई सवाल नहीं है। किसी हिस्से के बारे में पूछिए, जैसे: यह कौन सा भाग है?',
   noBottomView: 'कैमरा ज़मीन की ग्रिड के ऊपर ही रहता है, इसलिए नीचे का व्यू नहीं है। टॉप या फ्रंट व्यू देखिए।',
   interpreting: 'आपकी बात ठीक से समझ रही हूँ…',
   unsupportedRequest: 'यह इस व्यूअर में नहीं हो सकता। किसी पुर्ज़े को समझाने, या ज़ूम, घुमाने या व्यू दिखाने को कहिए।',
@@ -228,6 +236,8 @@ const BN: Phrases = {
   questionNoPart: 'ব্যাখ্যা এখনও পাওয়া যাচ্ছে না।',
   teachPreparing: '{part}-এর ব্যাখ্যা তৈরি করছি…',
   emptyTranscript: 'ঠিক শুনতে পেলাম না। আর একবার বলবেন?',
+  heardNoWords: 'আপনার গলা শুনেছি, কিন্তু কথাগুলো পরিষ্কার বুঝতে পারিনি। মাইক্রোফোনের একটু কাছে বলে আবার চেষ্টা করুন।',
+  bareReply: 'এখন হ্যাঁ বা না বলার মতো কোনো প্রশ্ন নেই। কোনো অংশ নিয়ে জিজ্ঞেস করুন, যেমন: এই অংশটা কী?',
   noBottomView: 'ক্যামেরা গ্রাউন্ড গ্রিডের উপরেই থাকে, তাই নিচের ভিউ নেই। উপরের বা সামনের ভিউ দেখুন।',
   interpreting: 'আপনার কথাটা ঠিক বুঝেছি কি না দেখছি…',
   unsupportedRequest: 'এই ভিউয়ারে ওটা করা যায় না। কোনো অংশ বুঝিয়ে বলতে, বা জুম, ঘোরানো বা কোনো ভিউ দেখাতে বলতে পারেন।',

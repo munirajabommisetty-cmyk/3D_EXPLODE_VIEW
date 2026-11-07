@@ -27,7 +27,30 @@ export const PLAN_LIMITS = {
   followUp: 120,
   holdMs: 4000,
   highlight: 20,
+  quizQuestion: 200,
+  quizAnswer: 300,
 } as const;
+
+/** One understanding-check question and the key idea a correct answer contains. */
+export interface QuizItem {
+  question: string;
+  answer: string;
+}
+
+/** Exactly two valid questions, or none (the tutor then builds its own from the model data). */
+export function validQuiz(raw: unknown): QuizItem[] {
+  if (!Array.isArray(raw) || raw.length !== 2) return [];
+  const out: QuizItem[] = [];
+  for (const item of raw) {
+    const q = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+    if (typeof q.question !== 'string' || typeof q.answer !== 'string') return [];
+    const question = q.question.trim();
+    const answer = q.answer.trim();
+    if (!question || !answer || question.length > PLAN_LIMITS.quizQuestion || answer.length > PLAN_LIMITS.quizAnswer) return [];
+    out.push({ question, answer });
+  }
+  return out;
+}
 
 /** The subset of V1 commands a plan may use: show and animate only (no hiding, switching, navigating). */
 export const TEACHABLE_ACTIONS: readonly SceneCommandType[] = [
@@ -73,6 +96,8 @@ export interface TeachingPlan {
   steps: TeachingStep[];
   rejectedSteps: RejectedStep[];
   followUpSuggestions: string[];
+  /** Understanding check written by the teacher with this explanation (empty when none). */
+  quiz?: QuizItem[];
   /** Task V5: narration language (Timbre voice) for this plan; default = the dock language. */
   language?: string;
   /** Task V5: 'llm' = AI teacher; 'modelData' = grounded explanation built from model data only. */
@@ -162,6 +187,7 @@ export function validateTeachingPlan(raw: unknown, snapshot: SceneSnapshot, ctx:
         }))
         : [],
       followUpSuggestions: followRaw.slice(0, PLAN_LIMITS.followUps).map((f) => text(f, PLAN_LIMITS.followUp, 'followUp')),
+      quiz: validQuiz(p.quiz),
       ...(typeof p.language === 'string' && /^[a-z]{2}-IN$/.test(p.language) ? { language: p.language } : {}),
       ...(p.source === 'llm' || p.source === 'modelData' ? { source: p.source } : {}),
     };

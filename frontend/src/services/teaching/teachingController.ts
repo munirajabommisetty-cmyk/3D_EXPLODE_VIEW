@@ -28,6 +28,7 @@ import { getSceneSnapshot } from '../scene/sceneSnapshot';
 import type { EngineeringModelDefinition } from '../../types/models';
 import type { TeachingRequestInfo } from '../voice/voiceSession';
 import { buildComponentBrief } from './componentBrief';
+import { LOCALIZED_BRIEF_LANGUAGES } from './localizedBrief';
 import { buildFactPack } from './factPack';
 import type { TeachHistoryTurn, TeachRequestBody, TeachStreamEvent } from './teachingClient';
 import { TEACH_ERROR_MESSAGES, TeachingServiceError } from './teachingClient';
@@ -35,9 +36,23 @@ import type { TeachingPlanPlayer } from './planPlayer';
 import { TEACHING_PLAN_SCHEMA_VERSION, validateTeachingPlan, type TeachingPlan, type TeachingStep } from './teachingPlan';
 import { LlmAvailability } from './llmAvailability';
 
+/** HISTORY_ANSWER_MAX: the backend accepts up to 400 characters per history answer. */
+export const HISTORY_ANSWER_MAX = 300;
+
+/** A short, whole-sentence summary of an answer for the conversation history (null if none). */
+export function historyAnswer(explanation: string | null | undefined): string | null {
+  const t = (explanation ?? '').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (t.length <= HISTORY_ANSWER_MAX) return t;
+  const cut = t.slice(0, HISTORY_ANSWER_MAX);
+  const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('। '), cut.lastIndexOf('? '));
+  return (end > 80 ? cut.slice(0, end + 1) : cut.replace(/\s+\S*$/, '') + '…');
+}
+
 /** Teaching narration languages (fully verified set); others get English plans and speech. */
 // Bengali added in Stage 3. Milestone A: the model-data fallback is built in te/hi/bn too.
-export const TEACHING_LANGUAGES = ['en-IN', 'te-IN', 'hi-IN', 'bn-IN'];
+/** The student's detected language decides the answer language (Prisma: 10 Indian languages). */
+export const TEACHING_LANGUAGES = ['en-IN', 'te-IN', 'hi-IN', 'bn-IN', 'ta-IN', 'kn-IN', 'ml-IN', 'mr-IN', 'gu-IN', 'pa-IN'];
 export const teachLanguage = (lang: string) => (TEACHING_LANGUAGES.includes(lang) ? lang : 'en-IN');
 
 export const FALLBACK_NOTICE = 'The AI teacher is not available right now, so this explanation comes from the model data.';
@@ -331,11 +346,11 @@ export class TeachingController {
       if (!started) return this.play(final.plan, info) ? 'started' : 'failed';
       const missing: TeachingStep[] = final.plan.steps.filter((st) => !received.has(st.index));
       if (missing.length) this.deps.player.append(missing);
-      const { title, explanation, followUpSuggestions, cannotAnswer, targetComponentId, planId, rejectedSteps } = final.plan;
-      this.deps.player.finishStream({ title, explanation, followUpSuggestions, cannotAnswer, targetComponentId, planId, rejectedSteps });
+      const { title, explanation, followUpSuggestions, cannotAnswer, targetComponentId, planId, rejectedSteps, quiz } = final.plan;
+      this.deps.player.finishStream({ title, explanation, followUpSuggestions, cannotAnswer, targetComponentId, planId, rejectedSteps, quiz });
       const last = this.history.turns[this.history.turns.length - 1];
       if (last && last.question === info.question) {
-        this.history.turns = [...this.history.turns.slice(0, -1), { ...last, title, targetComponentId }];
+        this.history.turns = [...this.history.turns.slice(0, -1), { ...last, title, targetComponentId, answer: historyAnswer(explanation) }];
       }
       return 'started';
     }
@@ -402,7 +417,9 @@ export class TeachingController {
     // The model-data brief knows the classic question types: examples are answered with the part's uses
     const qt = info.questionType === 'example' ? 'purpose' : info.questionType === 'general' ? 'explain' : info.questionType;
     let v = validateTeachingPlan(buildComponentBrief(model, snapshot, target, qt, requested, { bilingual: info.bilingual }), snapshot, ctx);
-    let localized = requested !== 'en-IN';
+    // Model-data answers exist in en / te / hi / bn; other detected languages get the English one,
+    // and the notice says it is in English
+    let localized = requested !== 'en-IN' && LOCALIZED_BRIEF_LANGUAGES.includes(requested);
     if (!v.ok && localized) {
       v = validateTeachingPlan(buildComponentBrief(model, snapshot, target, qt), snapshot, ctx);
       localized = false;
@@ -429,7 +446,9 @@ export class TeachingController {
     const ok = this.deps.player.start(plan, opts);
     this.set({ pending: false });
     if (ok) {
-      this.history.turns = [...this.history.turns, { question: info.question, targetComponentId: plan.targetComponentId, title: plan.title }].slice(-3);
+      this.history.turns = [...this.history.turns, {
+        question: info.question, targetComponentId: plan.targetComponentId, title: plan.title, answer: historyAnswer(plan.explanation),
+      }].slice(-3);
       this.deps.onPlanStarted?.(plan);
     } else {
       this.set({ error: this.deps.player.getState().message ?? 'The explanation could not start.' });

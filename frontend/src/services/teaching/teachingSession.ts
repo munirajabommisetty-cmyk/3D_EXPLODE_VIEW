@@ -16,7 +16,7 @@ import { getSceneSnapshot } from '../scene/sceneSnapshot';
 import type { TeachingRequestInfo } from '../voice/voiceSession';
 import { synthesize, type VoiceServiceError } from '../voice/voiceClient';
 import { streamTeachingPlan } from './teachingClient';
-import { createChunkedClip, createLiveClip, type AudioLike, type ChunkedClipDeps } from './chunkedNarration';
+import { createChunkedClip, createLiveClip, resetNarrationGapClock, type AudioLike, type ChunkedClipDeps } from './chunkedNarration';
 import { sharedLlmAvailability } from './llmAvailability';
 import { voiceTiming } from '../voice/voiceTiming';
 import type { TeachingPlan } from './teachingPlan';
@@ -56,6 +56,10 @@ export function createTimbreNarrator(getLanguage: () => string, onSpeechError: (
           });
           queue = p.catch(() => undefined);
           return p;
+        },
+        // Diagnostics: the silence heard between chunks (dev console; no text or audio)
+        onGap: (gap) => {
+          if (import.meta.env?.DEV) console.info('[voice-gap]', gap);
         },
         makeAudio: (blob) => {
           const url = URL.createObjectURL(blob);
@@ -193,7 +197,10 @@ export function useTeachingSession(opts: {
     controller.modelChanged(model?.id ?? null);
   }, [controller, model?.id]);
 
-  const ask = useCallback((info: TeachingRequestInfo) => controller.ask(info), [controller]);
+  const ask = useCallback((info: TeachingRequestInfo) => {
+    resetNarrationGapClock(); // gaps are measured inside one answer only
+    return controller.ask(info);
+  }, [controller]);
   const playRaw = useCallback((raw: unknown, q?: string) => controller.playRaw(raw, q), [controller]);
   const supersede = useCallback((reason?: string) => controller.supersede(reason), [controller]);
   const isActive = useCallback(() => controller.isActive(), [controller]);

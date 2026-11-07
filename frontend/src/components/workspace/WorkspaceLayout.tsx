@@ -559,6 +559,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
                 model={activeModel}
                 allModels={modelRegistry.getCatalogueModels()}
                 askRef={voiceAskRef}
+                selectedComponentId={selectedComponentId}
               />
             </div>
 

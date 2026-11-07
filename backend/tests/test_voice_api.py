@@ -215,3 +215,40 @@ def test_gnani_timing_log_has_no_text_or_key(key, calls, caplog):
     lines = [r.getMessage() for r in caplog.records if r.name == "app.timing"]
     assert lines and lines[0].startswith("gnani tts ") and "status=200" in lines[0]
     assert all(FAKE_KEY not in l and "సరే" not in l for l in lines)
+
+
+# ---------------- automatic language detection (Prisma v3.0, simulated) ----------------
+def test_auto_language_uses_prisma_v3_indic_auto_in_one_request(key, calls):
+    calls.response = FakeResponse(200, {"success": True, "request_id": "r9", "transcript": "sun gear ఎలా పనిచేస్తుంది",
+                                        "model": "prisma-v3.0", "detected_language_code": "te-IN"})
+    r = client.post("/api/voice/transcribe", data={"language": "auto", "keyterms": "Sun Gear,Planet Carrier Plate,<script>,Sun Gear"},
+                    files={"audio": ("speech.wav", make_wav(1.0), "audio/wav")})
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"transcript": "sun gear ఎలా పనిచేస్తుంది", "language": "te-IN", "detectedLanguage": "te-IN", "requestId": "r9"}
+    assert len(calls.seen) == 1, "one Prisma request, no per-language retries"
+    form = calls.seen[0]["data"]
+    assert form["model"] == "prisma-v3.0" and form["language_code"] == "indic-auto" and form["format"] == "codemix"
+    terms = form["keyterms"].split(",")
+    assert "Sun Gear" in terms and "Planet Carrier Plate" in terms and terms.count("Sun Gear") == 1
+    assert "script" in terms and not any("<" in t for t in terms), "markup characters are stripped"
+    assert "bias_score" not in form
+    assert FAKE_KEY not in r.text
+
+
+def test_auto_language_reports_unknown_or_missing_detection_as_none(key, calls):
+    calls.response = FakeResponse(200, {"success": True, "request_id": "r10", "transcript": "", "model": "prisma-v3.0"})
+    body = client.post("/api/voice/transcribe", data={"language": "auto"},
+                       files={"audio": ("speech.wav", make_wav(1.0), "audio/wav")}).json()
+    assert body["language"] is None and body["detectedLanguage"] is None and body["transcript"] == ""
+
+
+def test_explicit_language_keeps_the_previous_prisma_request(key, calls):
+    client.post("/api/voice/transcribe", data={"language": "hi-IN"}, files={"audio": ("speech.wav", make_wav(1.0), "audio/wav")})
+    form = calls.seen[0]["data"]
+    assert form["language_code"] == "hi-IN" and "model" not in form and form["format"] == "transcribe"
+
+
+def test_teacher_answers_in_every_detected_gnani_language():
+    from app import teaching
+    assert set(teaching.LANGUAGE_NAMES) == set(config.LANGUAGES), "every Prisma/Timbre language has a teaching language"

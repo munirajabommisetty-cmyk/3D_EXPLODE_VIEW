@@ -8,7 +8,7 @@
  * answer), ttsStart, ttsFirstAudioReady, firstAudio, teachEnd, responseDone.
  * A turn without a streamed answer is closed by its first audio; a streamed answer keeps the turn
  * open until the answer finished (teachEnd), so its late stages are measured too.
- * A turn's summary is logged (console.debug in development) when the next turn begins or when it
+ * A turn's summary is logged (console.info in development) when the next turn begins or when it
  * produces its first audio, and kept in a short in-memory list (window.__voiceTimings in dev).
  */
 
@@ -158,7 +158,7 @@ export function summarise(t: TurnTiming): TurnSummary {
 export const voiceTiming = new VoiceTimingLog({
   log: (s) => {
     if (import.meta.env?.DEV) {
-      console.debug('[voice-timing]', s);
+      console.info('[voice-timing]', s);
       (globalThis as unknown as { __voiceTimings?: readonly TurnSummary[] }).__voiceTimings = voiceTiming.recent();
     }
   },

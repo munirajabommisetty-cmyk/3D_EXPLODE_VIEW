@@ -154,7 +154,7 @@ def test_request_sent_to_provider_is_structured_minimal_and_keyed(client, provid
     user = sent["messages"][1]["content"]
     assert FAKE_KEY not in json.dumps(sent["messages"])
     assert "<<<\nExplain how power enters this gearbox\n>>>" in user
-    assert '"modelId": "planetary_gearbox"' in user
+    assert '"modelId":"planetary_gearbox"' in user
 
 
 def test_llm_cannot_change_the_model_id(client, provider):
@@ -431,13 +431,13 @@ def test_question_type_and_model_description_reach_the_prompt(client, provider):
     req["facts"]["modelDescription"] = "High-torque coaxial reduction gearbox."
     assert client.post("/api/teach", json=req).status_code == 200
     user = provider.calls[0]["json"]["messages"][1]["content"]
-    assert '"QUESTION_TYPE": "purpose"' in user
+    assert '"QUESTION_TYPE":"purpose"' in user
     assert "High-torque coaxial reduction gearbox." in user
 
 
 def test_question_type_defaults_to_explain_and_rejects_unknown_values(client, provider):
     client.post("/api/teach", json=body())
-    assert '"QUESTION_TYPE": "explain"' in provider.calls[0]["json"]["messages"][1]["content"]
+    assert '"QUESTION_TYPE":"explain"' in provider.calls[0]["json"]["messages"][1]["content"]
     r = client.post("/api/teach", json=body(questionType="run_code"))
     assert r.status_code == 422 and r.json()["error"]["code"] == "INVALID_REQUEST"
     assert len(provider.calls) == 1, "invalid request never reaches the provider"
@@ -451,14 +451,23 @@ def test_system_prompt_has_the_explanation_framework_and_honesty_rules():
     assert "NOT a physics" in p
 
 
+def test_system_prompt_guides_whole_model_answers_through_recorded_links():
+    """'How does this gearbox work': one recorded link per step with both parts highlighted, an
+    optional exploded view, and the app (not the LLM) restores the assembly afterwards."""
+    p = teaching.SYSTEM_PROMPT
+    assert "EXPLAINING THE WHOLE MODEL" in p
+    assert "one link per step" in p and "component.highlight with both ids" in p
+    assert "If supportsExplodedView" in p and "the app puts the assembly back" in p
+
+
 # ------------------------------- Stage 3: Bengali -------------------------------
 
 def test_bengali_request_asks_for_bengali_and_keeps_the_facts(client, provider):
     req = body(question="এই অংশটা বুঝিয়ে বলো", language="bn-IN")
     assert client.post("/api/teach", json=req).status_code == 200
     user = provider.calls[0]["json"]["messages"][1]["content"]
-    assert '"LANGUAGE": "Bengali"' in user
-    assert '"name": "Sun Gear"' in user, "component names are passed through unchanged"
+    assert '"LANGUAGE":"Bengali"' in user
+    assert '"name":"Sun Gear"' in user, "component names are passed through unchanged"
     assert "Bengali" in teaching.SYSTEM_PROMPT and "keep technical terms in English" in teaching.SYSTEM_PROMPT
     assert len(provider.calls) == 1
 
@@ -467,8 +476,25 @@ def test_bilingual_request_is_marked_for_the_teacher(client, provider):
     req = body(question="ఈ part ని English and Telugu రెండింటిలో explain చెయ్యి", language="te-IN", bilingual=True)
     assert client.post("/api/teach", json=req).status_code == 200
     user = provider.calls[0]["json"]["messages"][1]["content"]
-    assert '"BILINGUAL": true' in user and '"LANGUAGE": "Telugu"' in user
+    assert '"BILINGUAL":true' in user and '"LANGUAGE":"Telugu"' in user
     assert "If BILINGUAL is true" in teaching.SYSTEM_PROMPT
     plain = body()
     client.post("/api/teach", json=plain)
     assert "BILINGUAL" not in provider.calls[1]["json"]["messages"][1]["content"]
+
+
+# ------------------------------- conversation history: earlier answers -------------------------------
+
+def test_history_answers_reach_the_teacher_and_are_bounded(client, provider):
+    """Follow-ups: the browser sends a short summary of each earlier answer; it reaches the LLM."""
+    hist = [{"question": "What is its purpose?", "targetComponentId": "sun_gear", "title": "Sun Gear",
+             "answer": "The sun gear takes the input drive and turns the three planet gears."}]
+    assert client.post("/api/teach", json=body(question="Explain that again more simply", history=hist)).status_code == 200
+    user = provider.calls[0]["json"]["messages"][1]["content"]
+    assert '"answer":"The sun gear takes the input drive and turns the three planet gears."' in user
+    assert "build on it" in teaching.SYSTEM_PROMPT
+    too_long = [{**hist[0], "answer": "x" * (teaching.MAX_HISTORY_ANSWER + 1)}]
+    r = client.post("/api/teach", json=body(history=too_long))
+    assert r.status_code == 422 and r.json()["error"]["code"] == "INVALID_REQUEST"
+    old_shape = [{"question": "q", "targetComponentId": None, "title": None}]
+    assert client.post("/api/teach", json=body(history=old_shape)).status_code == 200, "answer is optional"

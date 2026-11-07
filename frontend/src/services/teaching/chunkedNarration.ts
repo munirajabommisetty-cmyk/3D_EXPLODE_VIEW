@@ -41,6 +41,11 @@ export interface ChunkedClipDeps {
   onFirstAudioPlayed?: () => void;
   /** Reading time for a chunk without audio (ms). */
   readingMs?: (text: string) => number;
+  /** Extra silence after a chunk before the next one starts (ms); default none (see TIMBRE_EDGE_SILENCE_MS). */
+  pauseMs?: (chunk: string) => number;
+  /** The silence the listener actually hears between two chunks (end of one -> start of the next),
+   *  and whether it was spent waiting for the next chunk's audio. Diagnostics only. */
+  onGap?: (gap: NarrationGap) => void;
   /** Polling interval for the reading-time fallback. */
   tickMs?: number;
   chunking?: SpeechChunkOptions;
@@ -53,6 +58,35 @@ export interface LiveNarrationClip extends NarrationClip {
   push(text: string): void;
   /** No more text: the clip ends after the last pushed chunk has played. */
   close(): void;
+}
+
+/**
+ * Silence Gnani Timbre already puts at the edges of every clip (measured on Timbre WAVs, 6 Nov
+ * 2026: ~120-130 ms before the first word, ~200-220 ms after the last). Two consecutive chunks are
+ * therefore already separated by ~330 ms, a natural sentence pause, so the player adds none. (It
+ * used to add 380 ms after each sentence on top: ~0.7 s gaps that made answers sound halting.)
+ */
+export const TIMBRE_EDGE_SILENCE_MS = { lead: 120, tail: 200 } as const;
+
+/** One silence between two narration chunks, as the listener hears it (plus Timbre's edge silence). */
+export interface NarrationGap {
+  gapMs: number;
+  /** The next chunk's audio was not ready yet: the gap was spent waiting for synthesis. */
+  waitedForAudio: boolean;
+  /** The gap was between two steps of the answer (camera move / hold), not inside one step. */
+  betweenSteps: boolean;
+}
+
+// When the last narration chunk of any clip ended: gaps are measured across steps too. Gaps longer
+// than this belong to a different answer and are not reported.
+let lastNarrationEndedAt: number | null = null;
+const SAME_ANSWER_GAP_MS = 60000;
+
+/** A new question starts: the next chunk's wait is response latency (speaking, transcription, the
+ *  teacher), not a pause inside an answer, so it is not reported as a gap. (Seen live: 18-24 s
+ *  "gaps" that were the time from the end of one answer to the start of the next.) */
+export function resetNarrationGapClock(): void {
+  lastNarrationEndedAt = null;
 }
 
 export function createChunkedClip(text: string, deps: ChunkedClipDeps): LiveNarrationClip {
@@ -74,6 +108,7 @@ export function createLiveClip(deps: ChunkedClipDeps): LiveNarrationClip {
   const controller = new AbortController();
   const readingMs = deps.readingMs ?? ((t: string) => Math.min(9000, Math.max(1800, t.length * 65)));
   const tick = deps.tickMs ?? 100;
+  const pauseMs = deps.pauseMs ?? (() => 0);
 
   // Synthesis runs one chunk at a time (Gnani rate limits parallel calls), always ahead of playback.
   const blobs = new Map<number, Promise<Blob>>();
@@ -128,6 +163,26 @@ export function createLiveClip(deps: ChunkedClipDeps): LiveNarrationClip {
     }, tick);
   });
 
+  /** A pause between segments (honours stop; pause() extends it until resume). */
+  const silence = (ms: number) => new Promise<void>((resolve) => {
+    if (ms <= 0) return resolve();
+    let left = ms;
+    const step = Math.min(tick, ms);
+    const timer = setInterval(() => {
+      if (stopped) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (paused) return;
+      left -= step;
+      if (left <= 0) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, step);
+  });
+
   const playChunk = (blob: Blob) => new Promise<boolean>((resolve) => {
     const made = deps.makeAudio(blob);
     current = made;
@@ -139,7 +194,10 @@ export function createLiveClip(deps: ChunkedClipDeps): LiveNarrationClip {
       if (current === made) current = null;
       resolve(ok);
     };
-    made.audio.onended = () => end(true);
+    made.audio.onended = () => {
+      lastNarrationEndedAt = Date.now();
+      end(true);
+    };
     made.audio.onerror = () => end(false);
     if (paused) return; // resume() starts it
     made.audio.play().then(
@@ -167,6 +225,12 @@ export function createLiveClip(deps: ChunkedClipDeps): LiveNarrationClip {
       }
       if (i + 1 < chunks.length) void request(i + 1).catch(() => undefined); // synthesize ahead
       let blob: Blob | null = null;
+      // Was this chunk's audio already made when playback reached it? (snapshot, for onGap)
+      let settledNow = false;
+      void request(i).then(() => (settledNow = true), () => undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+      const audioWasReady = settledNow;
       try {
         blob = await request(i);
       } catch (err) {
@@ -182,11 +246,18 @@ export function createLiveClip(deps: ChunkedClipDeps): LiveNarrationClip {
           readyReported = true;
           deps.onFirstAudioReady?.();
         }
+        if (lastNarrationEndedAt !== null) {
+          const gapMs = Date.now() - lastNarrationEndedAt;
+          if (gapMs < SAME_ANSWER_GAP_MS) deps.onGap?.({ gapMs, waitedForAudio: !audioWasReady, betweenSteps: i === 0 });
+        }
         const ok = await playChunk(blob);
         if (stopped) return finish('stopped');
         if (!ok) {
           anyFailed = true;
           await readingPause(chunks[i]);
+        } else if (i + 1 < chunks.length || !closed) {
+          // A short silence before the next segment (not after the last one)
+          await silence(pauseMs(chunks[i]));
         }
       } else {
         await readingPause(chunks[i]);

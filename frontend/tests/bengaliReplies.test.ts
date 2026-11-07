@@ -217,7 +217,9 @@ function bengaliExplainRequest(w: WS) {
 describe('Stage 3 Bengali teaching', () => {
   it('Bengali is a teaching language: the request asks for Bengali, and the plan is narrated in Bengali', async () => {
     assert.equal(teachLanguage('bn-IN'), 'bn-IN');
-    assert.equal(teachLanguage('ta-IN'), 'en-IN', 'other beta languages unchanged');
+    // Voice pass (6 Nov 2026): the teacher answers in the detected language for every Gnani language
+    assert.equal(teachLanguage('ta-IN'), 'ta-IN');
+    assert.equal(teachLanguage('xx-XX'), 'en-IN', 'unknown codes still fall back to English');
     const w = makeWorkspace();
     const t = teacher(w);
     try {

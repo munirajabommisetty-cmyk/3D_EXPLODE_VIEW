@@ -393,3 +393,54 @@ Push-to-talk is the barge-in signal: pressing the mic pauses narration at once (
 
 **UI**: Voice tutor dock with explicit states (listening, understanding, preparing, explaining step x/y, paused, speaking, error — each with a text/icon label), topic chip, always-visible Stop, example phrases, M shortcut; inspector "Ask the tutor" (Explain / Why is it needed? / How does it work? / What if it fails?) and a tutor card when nothing is selected; webcam panel compact until the camera starts and placed above the viewport toolbar; docks start collapsed at ≤ 1024 px; hierarchy names wrap to two lines.
 
+
+## 14. End-to-End Voice → AI → 3D Pipeline (verified map)
+
+Every arrow below was traced in the source code. Live Gnani and Gemini calls were not made during
+verification; those steps are covered by tests with simulated services.
+
+```
+Mic (push-to-talk: button or M)              components/voice/VoiceDock.tsx  startListening()
+  │  WAV recorded in the browser             services/voice/recorder.ts
+  ▼
+POST /api/voice/transcribe                   services/voice/voiceClient.ts  transcribe()
+  │                                          backend/app/main.py  transcribe()
+  ▼
+Gnani PRISMA (STT)                           backend/app/gnani.py  transcribe()  (bias list, en/te/hi)
+  │  transcript (auto mode: retried in te/hi/en only if not understood)   services/voice/voiceLanguage.ts
+  ▼
+Deterministic parser + part resolver         services/voice/phraseParser.ts, services/scene/referenceResolver.ts
+  │  "this" = a named part, else the part under the mouse / hand cursor right now, else the selected part, else the last topic
+  ├─► scene command (zoom, explode, "what is this connected to"…) ──► SceneCommandDispatcher (validated)
+  ├─► unknown phrasing ──► POST /api/interpret (LLM picks ONE intent from a fixed list) ──► same parser
+  └─► question ──► TeachingController   services/teaching/teachingController.ts
+                     │  fact pack from the model data + scene snapshot   services/teaching/factPack.ts
+                     ▼
+               POST /api/teach/stream ──► Gemini (OpenAI-compatible client, backend/app/llm.py)
+                     │  NDJSON steps, each validated against the fact pack   backend/app/teaching.py
+                     │  (if the LLM is unavailable: grounded model-data plan, services/teaching/componentBrief.ts)
+                     ▼
+               validateTeachingPlan (browser, against the live scene)   services/teaching/teachingPlan.ts
+                     ▼
+               TeachingPlanPlayer   services/teaching/planPlayer.ts
+                 per step: re-validate → dispatch actions (source 'ai') → camera settles →
+                 narration via POST /api/voice/speak ──► Gnani TIMBRE (TTS)  backend/app/gnani.py synthesize()
+                 on finish/cancel: highlight, isolation, exploded view and animation restored
+```
+
+**Rules that keep it trustworthy**
+- The LLM never touches Three.js. It returns plan data; only actions in `TEACHABLE_ACTIONS` with real component ids pass validation, twice (backend and browser), and they still go through the same dispatcher as mouse, keyboard, gesture and voice.
+- Whole-model answers ("how does this gearbox work") trace the **recorded** relationships one link per step, highlighting exactly the two parts named, then optionally separate the parts. This applies to both the Gemini prompt and the model-data plan.
+- Each step carries a claim label (shown in 3D / from model data / engineering explanation / not simulated). Failure questions are engineering reasoning plus an explicit "not simulated" step.
+- One voice turn at a time: a turn counter drops stale results, a new recording or question stops the current reply audio and pauses or replaces the explanation, and the Stop button cancels everything.
+
+**Voice + gesture together**: pointing (index finger) moves a cursor over the model; holding for 1.2 s selects the part. The pointed or selected part is what "this" means in the next spoken question. The tutor bar shows "<part> selected — tap the mic and ask about it", and the suggested questions switch to that part (Explain / What happens if I remove… / What is … connected to?). Clicking a suggestion or a follow-up runs exactly the spoken path, minus speech-to-text.
+
+**Tutor panel**: the question ("You asked"), a step-progress bar (one segment per real step), the current caption and narration, the claim label, **"Shown in the 3D model"** (names of the parts the step highlights or focuses, and "Parts separated"), Pause / Resume / Stop, and clickable follow-up questions.
+
+## 15. Conversational voice session and tutor (6 Nov 2026)
+
+- **One turn per microphone press.** `recorder.ts` `SpeechEndDetector` ends the turn ~1.1 s after the speaker stops. The noise floor follows the quietest recent audio (no calibration window, so speaking immediately works) and silence is judged against the speaker's own level (a fluctuating background no longer keeps the mic open). The microphone never restarts on its own; Stop / pressing the mic again ends or cancels the turn; a turn counter drops stale results.
+- **Automatic language (Prisma v3.0).** The browser sends `language=auto` plus the model's part names as `keyterms`; the backend calls Prisma with `model=prisma-v3.0`, `language_code=indic-auto`, `format=codemix` (one request) and returns `detected_language_code`. No language menu. If Prisma refuses the v3 request, the previous v2.5 per-language method is used. The detected language decides the answer language for all 10 Gnani languages; short app replies exist in en / te / hi / bn (English, spoken by the English voice, for the others).
+- **Natural speech.** `chunkedNarration.ts` speaks sentence-sized segments in order, synthesizing the next while one plays, with a natural pause between segments (`naturalPauseAfter`); stop() cancels everything queued, so an interrupted explanation never resumes.
+- **Tutor** (`tutorSession.ts`, `TutorCard.tsx`, `/api/tutor/evaluate`): after an explanation, "Does that make sense?" → yes: two questions (written by the teacher with the plan, field `quiz`; from the model data when the AI is unavailable) → each answer judged by the AI teacher (key-word check as fallback, labelled) → one retry with the misconception explained → summary. "Explain again" re-explains and checks again; "skip", another question or a scene command never force the quiz; one check per topic.

@@ -31,7 +31,7 @@ class GnaniError(Exception):
 
 _STATUS_MAP = {
     400: ("GNANI_BAD_REQUEST", "Gnani rejected the request (unsupported audio or parameters).", 400),
-    401: ("GNANI_AUTH", "Gnani rejected the API key. Check GNANI_API_KEY in backend/.env.", 502),
+    401: ("GNANI_AUTH", "Gnani rejected the API key. Check api_key (or GNANI_API_KEY) in .env.", 502),
     403: ("GNANI_FORBIDDEN", "Gnani refused access: check the API key, organisation status or remaining credits.", 502),
     429: ("GNANI_RATE_LIMIT", "Gnani rate limit reached. Please wait a moment and try again.", 429),
     500: ("GNANI_ERROR", "Gnani had an internal error. Please try again.", 502),
@@ -42,7 +42,7 @@ _STATUS_MAP = {
 def _key() -> str:
     key = config.gnani_api_key()
     if not key:
-        raise GnaniError("KEY_MISSING", "Gnani API key is not configured on the server (GNANI_API_KEY).", 503)
+        raise GnaniError("KEY_MISSING", "Gnani API key is not configured on the server (api_key or GNANI_API_KEY in .env).", 503)
     return key
 
 
@@ -81,17 +81,30 @@ def _post(url: str, **kwargs) -> requests.Response:
         _timing.info("gnani %s %.0f ms status=%s", kind, (time.perf_counter() - started) * 1000, status)
 
 
-def transcribe(audio: bytes, filename: str, language: str) -> dict:
-    resp = _post(
-        config.GNANI_BASE_URL + config.STT_PATH,
-        headers={"X-API-Key-ID": _key()},
-        files={"audio_file": (filename, audio, "audio/wav")},
-        data={
+def transcribe(audio: bytes, filename: str, language: str, keyterms: list[str] | None = None) -> dict:
+    """language "auto": Prisma v3.0 detects the language (one request); otherwise the given
+    language with Prisma v2.5 (the previous behaviour). Returns transcript, request_id and, for
+    "auto", detected_language (None when Prisma could not judge it, e.g. silence)."""
+    if language == config.AUTO_LANGUAGE:
+        terms = list(dict.fromkeys([*config.STT_BIAS_WORDS, *(keyterms or [])]))[: config.MAX_KEYTERMS]
+        data = {
+            "model": config.STT_AUTO_MODEL,
+            "language_code": config.STT_AUTO_LANGUAGE_CODE,
+            "format": config.STT_AUTO_FORMAT,
+            "keyterms": ",".join(terms),
+        }
+    else:
+        data = {
             "language_code": language,
             "format": "transcribe",  # inverse text normalisation: numbers as digits
             "bias_list": ",".join(config.STT_BIAS_WORDS),
             "bias_score": "1.0",
-        },
+        }
+    resp = _post(
+        config.GNANI_BASE_URL + config.STT_PATH,
+        headers={"X-API-Key-ID": _key()},
+        files={"audio_file": (filename, audio, "audio/wav")},
+        data=data,
     )
     if resp.status_code != 200:
         _raise_for(resp, "stt")
@@ -99,9 +112,16 @@ def transcribe(audio: bytes, filename: str, language: str) -> dict:
         body = resp.json()
     except ValueError as exc:
         raise GnaniError("GNANI_ERROR", "Gnani returned an unreadable response.", 502) from exc
+    if not isinstance(body, dict):
+        raise GnaniError("GNANI_ERROR", "Gnani returned an unreadable response.", 502)
     if not body.get("success", True):
         raise GnaniError("GNANI_ERROR", "Gnani could not transcribe the audio.", 502)
-    return {"transcript": (body.get("transcript") or "").strip(), "request_id": body.get("request_id")}
+    if "transcript" not in body:
+        # A reply without the field is a service fault, not "you said nothing"
+        raise GnaniError("GNANI_NO_TRANSCRIPT", "Gnani's reply contained no transcript.", 502)
+    return {"transcript": (body.get("transcript") or "").strip(), "request_id": body.get("request_id"),
+            "detected_language": body.get("detected_language_code"),
+            "processing_time": body.get("processing_time")}  # Prisma's own processing time (diagnostics)
 
 
 def synthesize(text: str, language: str) -> bytes:

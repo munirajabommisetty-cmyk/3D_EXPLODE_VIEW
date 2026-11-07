@@ -41,3 +41,7 @@ import './xrayCallouts.test.ts';
 import './voiceConversation.test.ts';
 import './voiceAudioFirst.test.ts';
 import './teachingPanelUi.test.ts';
+import './tutorDemoFlow.test.ts';
+import './trackingPerformance.test.ts';
+import './conversationHistory.test.ts';
+import './voiceSessionLifecycle.test.ts';

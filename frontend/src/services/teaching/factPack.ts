@@ -83,12 +83,14 @@ export function buildFactPack(
 
   const components = ids.map((id) => {
     const meta = model.getComponentMetadata(id);
+    const full = detailed.has(id);
+    // Every relationship is always listed (type + target); its sentence only for the parts the
+    // question is about (all parts for whole-model questions). Fewer tokens, same facts.
     const relationships = getComponentRelationships(model, id).slice(0, 20).map((r) => ({
       type: r.relationshipType,
       target: r.targetComponentId,
-      description: clip(r.description, 300),
+      description: full ? clip(r.description, 300) : '',
     }));
-    const full = detailed.has(id);
     const notes: string[] = [];
     if (full && meta) {
       notes.push(...meta.engineeringNotes.slice(0, 3));

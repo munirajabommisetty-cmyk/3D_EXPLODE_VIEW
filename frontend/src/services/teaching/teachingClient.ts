@@ -9,6 +9,8 @@ export interface TeachHistoryTurn {
   question: string;
   targetComponentId: string | null;
   title: string | null;
+  /** What the tutor answered (the plan's short explanation, clipped), so follow-ups can build on it. */
+  answer?: string | null;
 }
 
 export interface TeachRequestBody {

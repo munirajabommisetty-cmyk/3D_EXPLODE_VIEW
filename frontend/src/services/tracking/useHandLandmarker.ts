@@ -33,6 +33,19 @@ const LOCAL_MODEL_PATH = '/models/hand_landmarker.task';
 const CDN_MODEL_PATH =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
+/**
+ * While no hand is in view, MediaPipe runs its (heavier) palm detector on every frame. Measured on
+ * the dev machine: ~24 ms per call with the GPU delegate, i.e. most of a 33 ms camera frame on the
+ * main thread. Searching for a hand ~15 times a second halves that cost; as soon as a hand is found,
+ * every camera frame is processed again (tracking latency unchanged).
+ */
+export const IDLE_DETECT_INTERVAL_MS = 66;
+
+/** True when a frame should be skipped because no hand is tracked and the last search was recent. */
+export function shouldSkipIdleFrame(trackedHands: number, now: number, lastDetectAt: number): boolean {
+  return trackedHands === 0 && lastDetectAt > 0 && now - lastDetectAt < IDLE_DETECT_INTERVAL_MS;
+}
+
 export function useHandLandmarker({
   videoRef,
   isCameraActive,
@@ -57,12 +70,23 @@ export function useHandLandmarker({
   const fpsFrameCountRef = useRef<number>(0);
   const fpsLastTimestampRef = useRef<number>(0);
   const isInitializingRef = useRef<boolean>(false);
+  // Performance pass: hands currently tracked, when detection last ran, and the last status sent
+  const trackedCountRef = useRef<number>(0);
+  const lastDetectAtRef = useRef<number>(0);
+  const statusRef = useRef<HandLandmarkerStatus>('idle');
+  const setStatusOnce = useCallback((next: HandLandmarkerStatus) => {
+    if (statusRef.current !== next) {
+      statusRef.current = next;
+      setStatus(next);
+    }
+  }, []);
 
   // Initialize MediaPipe HandLandmarker
   const initLandmarker = useCallback(async () => {
     if (landmarkerRef.current || isInitializingRef.current) return;
 
     isInitializingRef.current = true;
+    statusRef.current = 'initializing';
     setStatus('initializing');
     setErrorMessage(null);
 
@@ -105,12 +129,26 @@ export function useHandLandmarker({
         });
       }
 
+      // Warm-up: the first detection compiles the GPU shaders (measured ~4.5 s on the dev machine).
+      // Do it now, behind the "initializing" state, instead of freezing the first live frame.
+      await new Promise((resolve) => setTimeout(resolve, 30)); // let the loading state paint first
+      try {
+        const warm = document.createElement('canvas');
+        warm.width = 640;
+        warm.height = 480;
+        landmarker.detectForVideo(warm, performance.now());
+      } catch (warmErr) {
+        console.warn('Hand tracker warm-up skipped:', warmErr);
+      }
+
       landmarkerRef.current = landmarker;
+      statusRef.current = 'ready';
       setStatus('ready');
     } catch (err: unknown) {
       console.error('Failed to initialize HandLandmarker:', err);
       const msg = err instanceof Error ? err.message : 'Failed to initialize hand tracker';
       setErrorMessage(msg);
+      statusRef.current = 'error';
       setStatus('error');
     } finally {
       isInitializingRef.current = false;
@@ -133,8 +171,11 @@ export function useHandLandmarker({
     }
     multiHandFilter.reset();
     defaultTelemetry.vision.reset();
+    trackedCountRef.current = 0;
+    lastDetectAtRef.current = 0;
     setHands([]);
     setTrackingFps(0);
+    statusRef.current = 'idle';
     setStatus('idle');
     setErrorMessage(null);
   }, [multiHandFilter]);
@@ -147,8 +188,11 @@ export function useHandLandmarker({
       // Clear detections when camera is turned off
       multiHandFilter.reset();
       defaultTelemetry.vision.reset();
+      trackedCountRef.current = 0;
+      lastDetectAtRef.current = 0;
       setHands([]);
       setTrackingFps(0);
+      statusRef.current = 'idle';
       setStatus('idle');
     }
   }, [isCameraActive, initLandmarker, multiHandFilter]);
@@ -172,9 +216,14 @@ export function useHandLandmarker({
       const landmarker = landmarkerRef.current;
 
       if (video && landmarker && video.readyState >= 2 && !video.paused) {
-        if (video.currentTime !== lastVideoTimeRef.current) {
+        const now = performance.now();
+        if (
+          video.currentTime !== lastVideoTimeRef.current &&
+          !shouldSkipIdleFrame(trackedCountRef.current, now, lastDetectAtRef.current)
+        ) {
           lastVideoTimeRef.current = video.currentTime;
-          const timestamp = performance.now();
+          const timestamp = now;
+          lastDetectAtRef.current = timestamp;
 
           try {
             const t0 = performance.now();
@@ -196,7 +245,8 @@ export function useHandLandmarker({
 
             // Map results to typed structures
             if (results.landmarks && results.landmarks.length > 0) {
-              setStatus('detecting');
+              trackedCountRef.current = results.landmarks.length;
+              setStatusOnce('detecting');
 
               const rawDetectedHands: HandLandmarkResult[] = results.landmarks.map(
                 (rawLandmarks, idx) => {
@@ -256,8 +306,13 @@ export function useHandLandmarker({
               });
 
               multiHandFilter.reset();
-              setHands([]);
-              setStatus('ready');
+              // Only tell React when hands disappear: a new empty array every frame re-rendered
+              // everything that depends on the hands about 30 times a second with nothing in view
+              if (trackedCountRef.current !== 0) {
+                trackedCountRef.current = 0;
+                setHands([]);
+              }
+              setStatusOnce('ready');
               gestureDiagnostics.update({
                 handsDetected: 0,
                 trackingStatus: 'ready',
@@ -282,7 +337,7 @@ export function useHandLandmarker({
         animFrameIdRef.current = null;
       }
     };
-  }, [enableSmoothing, isCameraActive, multiHandFilter, status, videoRef]);
+  }, [enableSmoothing, isCameraActive, multiHandFilter, status, videoRef, setStatusOnce]);
 
   // Complete cleanup on unmount
   useEffect(() => {

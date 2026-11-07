@@ -70,6 +70,18 @@ export function turnLanguage(text: string, uiLanguage: string): string {
   return uiLanguage;
 }
 
+/**
+ * The language of one auto-detected voice turn (decided afresh every turn, never carried over just
+ * because the last turn used it). Prisma's detection is used, except when it contradicts the
+ * transcript's own script among English / Telugu / Hindi (Telugu letters are Telugu). Without a
+ * detection, the script decides; Latin text after a Telugu / Hindi turn is English.
+ */
+export function autoTurnLanguage(detected: string | null, text: string, current: string): string {
+  const script = scriptLanguage(text);
+  if (script && detected !== script && (detected === null || ['en-IN', 'te-IN', 'hi-IN'].includes(detected))) return script;
+  return detected ?? turnLanguage(text, current);
+}
+
 export type TranscribeFn = (wav: Blob, language: string, signal?: AbortSignal) => Promise<string>;
 
 export interface UnderstoodTranscript {

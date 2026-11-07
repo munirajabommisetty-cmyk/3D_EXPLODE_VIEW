@@ -438,10 +438,11 @@ describe('Recorder helpers', () => {
     let end = null;
     for (let i = 0; i < 300 && !end; i++) end = quiet.push(0.004, 43);
     assert.equal(end, 'nospeech');
+    // Someone who keeps talking (speech with the normal short gaps between syllables) hits the cap
     const talker = new SpeechEndDetector();
     end = null;
     for (let i = 0; i < 6; i++) talker.push(0.004, 43);
-    for (let i = 0; i < 1000 && !end; i++) end = talker.push(0.3, 43);
+    for (let i = 0; i < 1000 && !end; i++) end = talker.push(i % 5 === 4 ? 0.01 : 0.3, 43);
     assert.equal(end, 'max');
   });
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Icon } from '../ui/Icon';
 import { useCamera, type UseCameraReturn } from '../../hooks/useCamera';
 import { useHandLandmarker } from '../../hooks/useHandLandmarker';
@@ -7,6 +7,7 @@ import { SkeletonOverlay } from './SkeletonOverlay';
 import { GestureBadge } from './GestureBadge';
 import type { HandLandmarkResult } from '../../types/landmarks';
 import type { GestureRecognitionResult } from '../../types/gestures';
+import { coarseGestureKey, coarseHandsKey, handFrameStore } from '../../services/tracking/handFrameStore';
 import './WebcamPreview.css';
 
 interface WebcamPreviewProps {
@@ -51,19 +52,32 @@ export const WebcamPreview: React.FC<WebcamPreviewProps> = ({
     hands: handTracker.hands,
   });
 
-  // Notify parent of detected hands if listener was provided
+  // Every tracked frame goes to the hand-frame store: the 3D viewer reads it in its render loop
+  // (refs), so a camera frame does not re-render the whole workspace.
+  // (Declared before the notifications below: effects run in order, so the refs are current there.)
+  const latestHandsRef = useRef(handTracker.hands);
+  const latestGestureRef = useRef(primaryGesture);
+  useEffect(() => {
+    latestHandsRef.current = handTracker.hands;
+    latestGestureRef.current = primaryGesture;
+    handFrameStore.publish(handTracker.hands, primaryGesture);
+  }, [handTracker.hands, primaryGesture]);
+
+  // The parent's React state only changes when what the UI shows changes (hand count / which hands)
+  const handsKey = coarseHandsKey(handTracker.hands);
   useEffect(() => {
     if (onHandsDetected) {
-      onHandsDetected(handTracker.hands);
+      onHandsDetected(latestHandsRef.current);
     }
-  }, [handTracker.hands, onHandsDetected]);
+  }, [handsKey, onHandsDetected]);
 
-  // Notify parent of recognized gesture if listener was provided
+  // Notify the parent when the shown gesture state changes (name, stability, hand, confidence in 10 % steps)
+  const gestureKey = coarseGestureKey(primaryGesture);
   useEffect(() => {
     if (onGestureChange) {
-      onGestureChange(primaryGesture);
+      onGestureChange(latestGestureRef.current);
     }
-  }, [primaryGesture, onGestureChange]);
+  }, [gestureKey, onGestureChange]);
 
   return (
     <aside

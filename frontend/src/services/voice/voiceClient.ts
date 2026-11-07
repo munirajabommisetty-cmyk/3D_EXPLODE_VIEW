@@ -91,6 +91,18 @@ async function toError(resp: Response): Promise<VoiceServiceError> {
   return new VoiceServiceError(code, VOICE_ERROR_MESSAGES[code] ?? message);
 }
 
+/** Diagnostics for a recording that was not sent to Prisma (metadata only; the backend writes it
+ *  only when VOICE_DIAG=1). Fire and forget: it can never affect the conversation. */
+export function sendRecordingDiag(diag: Record<string, number | string | null>, fetchImpl: FetchLike = fetch): void {
+  try {
+    const form = new FormData();
+    form.append('diag', JSON.stringify(diag));
+    void fetchImpl('/api/voice/diag', { method: 'POST', body: form }).catch(() => undefined);
+  } catch {
+    // diagnostics only
+  }
+}
+
 export async function getVoiceHealth(signal?: AbortSignal, fetchImpl?: FetchLike): Promise<VoiceHealth> {
   const resp = await call('/api/voice/health', { method: 'GET' }, signal, fetchImpl);
   if (!resp.ok) throw await toError(resp);
@@ -109,6 +121,34 @@ export async function transcribe(wav: Blob, language: string, signal?: AbortSign
   if (!resp.ok) throw await toError(resp);
   const body = await resp.json();
   return String(body.transcript ?? '');
+}
+
+export interface AutoTranscript {
+  text: string;
+  /** Language Prisma detected (a supported code), or null when it could not judge (silence, only names). */
+  language: string | null;
+}
+
+/** Errors on which the app falls back to the previous per-language transcription. */
+export const AUTO_STT_FALLBACK_CODES = ['GNANI_BAD_REQUEST', 'UNSUPPORTED_LANGUAGE', 'INVALID_REQUEST'];
+
+/**
+ * One Prisma request with automatic language detection (Prisma v3.0 "indic-auto" on the backend).
+ * `keyterms`: part names of the loaded model, to help Prisma with technical words.
+ */
+export async function transcribeAuto(
+  wav: Blob, keyterms: string[], signal?: AbortSignal, fetchImpl?: FetchLike, diag?: Record<string, number | string | null>
+): Promise<AutoTranscript> {
+  const form = new FormData();
+  form.append('audio', wav, 'speech.wav');
+  form.append('language', 'auto');
+  if (keyterms.length) form.append('keyterms', keyterms.slice(0, 60).join(','));
+  // Diagnostics: recording metadata (numbers only); the backend logs it only when VOICE_DIAG=1
+  if (diag) form.append('diag', JSON.stringify(diag));
+  const resp = await call('/api/voice/transcribe', { method: 'POST', body: form }, signal, fetchImpl);
+  if (!resp.ok) throw await toError(resp);
+  const body = await resp.json();
+  return { text: String(body.transcript ?? ''), language: typeof body.language === 'string' ? body.language : null };
 }
 
 export async function synthesize(text: string, language: string, signal?: AbortSignal, fetchImpl?: FetchLike): Promise<Blob> {

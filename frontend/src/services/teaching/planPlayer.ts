@@ -32,6 +32,15 @@ import type { SceneCommand } from '../commands/sceneCommands';
 import type { SceneSnapshot } from '../scene/sceneSnapshot';
 import { validateStepNow, type RejectedStep, type TeachingPlan, type TeachingStep } from './teachingPlan';
 
+/** Silent viewing time after a step's narration. Only a step that starts an animation gets one
+ *  (watching it is the point), capped at MAX_SILENT_HOLD_MS; any other hold is just a pause in the
+ *  spoken answer, so it is skipped whatever the plan asked for. */
+export const MAX_SILENT_HOLD_MS = 1500;
+export function effectiveHoldMs(step: { holdMs: number; actions: readonly { type: string }[] }): number {
+  if (!(step.holdMs > 0) || !step.actions.some((a) => a.type === 'animation.play')) return 0;
+  return Math.min(step.holdMs, MAX_SILENT_HOLD_MS);
+}
+
 export type PlayerStatus = 'idle' | 'running' | 'paused' | 'waitingForUser' | 'finished' | 'cancelled' | 'failed';
 export type StepPhase = 'actions' | 'narrating' | 'holding' | null;
 
@@ -126,7 +135,9 @@ export class TeachingPlanPlayer {
   constructor(deps: PlayerDeps) {
     // Narration starts when the camera has settled, but never later than settleTimeoutMs after the
     // step's actions (voice latency: speech is not held back by a long camera move)
-    this.deps = { pollMs: 40, settleTimeoutMs: 1200, ...deps };
+    // 700 ms: speech may begin while the last part of a camera move finishes (a teacher talks while
+    // pointing); waiting up to 1.2 s per step added a silent gap before every step's narration
+    this.deps = { pollMs: 40, settleTimeoutMs: 700, ...deps };
   }
 
   /** Starts watching the dispatcher for manual takeover. Returns the detach function. */
@@ -246,7 +257,7 @@ export class TeachingPlanPlayer {
   }
 
   /** No more steps will be appended; final plan details (title, summary, follow-ups) may be updated. */
-  public finishStream(update: Partial<Pick<TeachingPlan, 'title' | 'explanation' | 'followUpSuggestions' | 'cannotAnswer' | 'targetComponentId' | 'planId' | 'rejectedSteps'>> = {}): void {
+  public finishStream(update: Partial<Pick<TeachingPlan, 'title' | 'explanation' | 'followUpSuggestions' | 'cannotAnswer' | 'targetComponentId' | 'planId' | 'rejectedSteps' | 'quiz'>> = {}): void {
     if (!this.live) return;
     this.open = false;
     // live narrations end with what they have (no more text will come)
@@ -441,9 +452,10 @@ export class TeachingPlanPlayer {
       if (!(await this.waitUntil(token, plan, () => narrationOver))) return;
       this.clip = null;
 
-      if (step.holdMs > 0) {
+      const hold = effectiveHoldMs(step);
+      if (hold > 0) {
         this.set({ phase: 'holding' });
-        if (!(await this.waitUntil(token, plan, () => false, step.holdMs))) return;
+        if (!(await this.waitUntil(token, plan, () => false, hold))) return;
       }
       if (step.waitFor === 'user' && (pos + 1 < plan.steps.length || this.open)) {
         this.continueRequested = false;

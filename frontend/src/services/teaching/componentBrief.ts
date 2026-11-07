@@ -127,9 +127,18 @@ export function buildComponentBrief(
   if (componentId) {
     const meta = model.getComponentMetadata(componentId);
     const name = meta?.name ?? componentId;
+    // The question decides the angle (so "why is it needed" and "how does it work" get different
+    // answers); every sentence still comes from the model data.
+    const purpose = questionType === 'purpose';
+    const howWorks = questionType === 'howWorks';
     steps.push(step(0, {
-      kind: 'demonstrate', claim: 'metadata', target: componentId, caption: name,
-      narration: `This is the ${name}. Its role: ${meta?.role ?? 'not recorded'}. ${meta?.description ?? ''}`,
+      kind: 'demonstrate', claim: 'metadata', target: componentId,
+      caption: purpose ? `Why the ${name} is needed` : howWorks ? `How the ${name} works` : name,
+      narration: purpose
+        ? `The ${name} is needed for this job: ${meta?.role ?? 'not recorded'}.`
+        : howWorks
+          ? `Here is how the ${name} works. ${meta?.description ?? meta?.role ?? ''}`
+          : `This is the ${name}. Its role: ${meta?.role ?? 'not recorded'}. ${meta?.description ?? ''}`,
       actions: can('component.focus') ? [{ type: 'component.focus', componentId }] : [],
     }));
 
@@ -145,8 +154,11 @@ export function buildComponentBrief(
       const clauses = [...byVerb.entries()].map(([verb, names]) => `${verb} ${list(names)}`);
       const related = [...new Set(rels.map((r) => r.targetComponentId))];
       steps.push(step(1, {
-        kind: 'demonstrate', claim: 'metadata', target: componentId, caption: `How the ${name} connects`,
-        narration: `In this model, the ${name} ${list(clauses)}.`,
+        kind: 'demonstrate', claim: 'metadata', target: componentId,
+        caption: purpose ? `What relies on the ${name}` : `How the ${name} connects`,
+        narration: purpose
+          ? `It matters because the ${name} ${list(clauses)}; those parts depend on it doing its job.`
+          : `In this model, the ${name} ${list(clauses)}.`,
         actions: can('component.highlight') ? [{ type: 'component.highlight', componentIds: related.slice(0, PLAN_LIMITS.highlight) }] : [],
       }));
     } else {
@@ -157,7 +169,7 @@ export function buildComponentBrief(
     }
 
     const notes = meta?.engineeringNotes ?? [];
-    if (notes.length > 0) {
+    if (notes.length > 0 && !purpose) {
       steps.push(step(2, {
         claim: 'metadata', target: componentId, caption: anatomy ? 'Key facts' : 'From the engineering notes',
         narration: notes.slice(0, 2).join(' '),
@@ -183,27 +195,48 @@ export function buildComponentBrief(
 
     return {
       schemaVersion: 1, planId: hexId(), modelId: model.id, targetComponentId: componentId,
-      title: `${name} (from the model data)`,
-      explanation: fit(`${name}: ${meta?.role ?? ''}. ${meta?.description ?? ''}`, PLAN_LIMITS.explanation),
+      title: `${purpose ? `Why the ${name} is needed` : howWorks ? `How the ${name} works` : name} (from the model data)`,
+      explanation: fit(purpose
+        ? `The ${name} is needed for this job: ${meta?.role ?? ''}.`
+        : `${name}: ${meta?.role ?? ''}. ${meta?.description ?? ''}`, PLAN_LIMITS.explanation),
       cannotAnswer: null, steps, rejectedSteps: [],
       followUpSuggestions: [`Why is the ${name} needed?`, `Show me the parts connected to the ${name}.`],
       language: 'en-IN', source: 'modelData',
     };
   }
 
-  // Whole model
+  // Whole model: the overview, then the recorded drive / load path one link at a time with both
+  // parts highlighted while it is spoken, then (if supported) the parts separated to show how they
+  // fit together. The player puts highlight and exploded view back when the explanation ends.
   steps.push(step(0, { claim: 'metadata', caption: model.name, narration: `${model.name}. ${model.description}` }));
   const seen = new Set<string>();
-  const facts: string[] = [];
+  const facts: { description: string; from: string; to: string; type: string }[] = [];
   for (const id of model.getAllComponentIds()) {
     for (const r of getComponentRelationships(model, id)) {
       if (!r.description || seen.has(r.description) || !['drives', 'supports', 'transfers_force_to', 'connected_to'].includes(r.relationshipType)) continue;
       seen.add(r.description);
-      facts.push(r.description);
+      facts.push({ description: r.description, from: id, to: r.targetComponentId, type: r.relationshipType });
     }
   }
-  if (facts.length > 0) {
-    steps.push(step(1, { claim: 'metadata', caption: 'How the parts work together', narration: facts.slice(0, 4).join(' ') }));
+  for (const f of facts.slice(0, 3)) {
+    const verb = VERB[f.type] ?? f.type.replace(/_/g, ' ');
+    steps.push(step(steps.length, {
+      kind: 'demonstrate', claim: 'metadata', target: f.from,
+      caption: `${nameOf(f.from)} ${verb} ${nameOf(f.to)}`,
+      narration: f.description,
+      actions: can('component.highlight') ? [{ type: 'component.highlight', componentIds: [f.from, f.to] }] : [],
+    }));
+  }
+  const partCount = model.getAllComponentIds().length;
+  if (!anatomy && snapshot.exploded.supported && can('assembly.explode') && partCount > 1) {
+    steps.push(step(steps.length, {
+      kind: 'demonstrate', claim: 'visible', caption: 'The parts, separated',
+      narration: `Here the ${partCount} parts are separated, so you can see how they fit together. Select any part and ask me about it.`,
+      actions: [
+        ...(can('component.clearHighlight') ? [{ type: 'component.clearHighlight' }] : []),
+        { type: 'assembly.explode', factor: 0.75 },
+      ],
+    }));
   }
   const modelExample = teachingNote(model.id, null, 'en-IN')?.analogy;
   if (modelExample) steps.push(step(steps.length, { claim: 'engineering', caption: 'An everyday comparison', narration: modelExample }));
@@ -220,7 +253,10 @@ export function buildComponentBrief(
     title: `${model.name} (from the model data)`,
     explanation: fit(model.description, PLAN_LIMITS.explanation),
     cannotAnswer: null, steps, rejectedSteps: [],
-    followUpSuggestions: ['Select a part and ask me to explain it.'],
+    // Follow-ups are real questions about parts this explanation named (one click asks them)
+    followUpSuggestions: facts.length > 0
+      ? [`Explain the ${nameOf(facts[0].from)}`, `What happens if I remove the ${nameOf(facts[0].to)}?`]
+      : ['Select a part and ask me to explain it.'],
     language: 'en-IN', source: 'modelData',
   };
 }

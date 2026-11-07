@@ -59,13 +59,22 @@ def run_both():
 
 # ---------------------------------------------------------------- defaults: Gemini unchanged
 
-def test_gemini_is_detected_and_requests_are_unchanged_by_default(monkeypatch, http):
+@pytest.fixture(autouse=True)
+def _fresh_effort_memory():
+    llm._EFFORT_REJECTED.clear()
+    yield
+    llm._EFFORT_REJECTED.clear()
+
+
+def test_gemini_is_detected_and_asks_for_low_thinking_by_default(monkeypatch, http):
+    """Latency fix: Gemini's default (highest) thinking level cost ~14 s before the first token."""
     use(monkeypatch, GEMINI)
     assert llm.provider() == "gemini"
     run_both()
     json_body, stream_body = http.bodies
-    assert set(json_body) == {"model", "messages", "temperature", "response_format"}
-    assert set(stream_body) == {"model", "messages", "temperature", "response_format", "stream"}
+    assert set(json_body) == {"model", "messages", "temperature", "response_format", "reasoning_effort"}
+    assert set(stream_body) == {"model", "messages", "temperature", "response_format", "stream", "reasoning_effort"}
+    assert json_body["reasoning_effort"] == stream_body["reasoning_effort"] == "low"
     assert json_body["response_format"]["type"] == "json_schema" and stream_body["response_format"] == {"type": "json_object"}
 
 
@@ -137,7 +146,8 @@ def test_provider_info_reports_only_safe_fields(monkeypatch):
     use(monkeypatch, {**EVON, "LLM_PROVIDER": "evon", "LLM_EVON_THINKING": "off",
                       "LLM_BASE_URL": "http://gpu-box.internal:8100/v1/?token=should-not-leak"})
     info = llm.provider_info()
-    assert info == {"provider": "evon", "model": "model", "endpointHost": "gpu-box.internal", "thinking": "off"}
+    assert info == {"provider": "evon", "model": "model", "endpointHost": "gpu-box.internal", "thinking": "off",
+                    "reasoningEffort": "default"}
     assert "secret-key-abc123" not in json.dumps(info) and "should-not-leak" not in json.dumps(info)
 
 
@@ -147,5 +157,61 @@ def test_health_endpoint_shows_the_provider_without_the_key(monkeypatch):
     resp = TestClient(main.app).get("/api/voice/health")
     teaching = resp.json()["teaching"]
     assert teaching["provider"] == {"provider": "gemini", "model": "gemini-test",
-                                    "endpointHost": "generativelanguage.googleapis.com", "thinking": "notApplicable"}
+                                    "endpointHost": "generativelanguage.googleapis.com", "thinking": "notApplicable",
+                                    "reasoningEffort": "low"}
     assert "secret-key-abc123" not in resp.text and "gnani-secret" not in resp.text
+
+
+# ---------------------------------------------------------------- Gemini thinking level (latency)
+
+def test_reasoning_effort_setting_and_default(monkeypatch):
+    for value, expected in [(None, "low"), ("minimal", "minimal"), ("HIGH", "high"), ("bogus", "low"), ("default", None)]:
+        use(monkeypatch, {**GEMINI, "LLM_REASONING_EFFORT": value})
+        assert llm.reasoning_effort() == expected, value
+    use(monkeypatch, EVON)
+    assert llm.reasoning_effort() is None, "only Gemini receives reasoning_effort"
+
+
+def test_rejected_reasoning_effort_is_retried_once_without_it_and_remembered(monkeypatch):
+    use(monkeypatch, GEMINI)
+    sent: list[dict] = []
+
+    class Bad:
+        status_code = 400
+        text = '{"error": {"message": "Unknown name reasoning_effort"}}'
+
+        def json(self):
+            return json.loads(self.text)
+
+        def close(self):
+            pass
+
+    def fake_post(url, **kw):
+        sent.append(kw["json"])
+        return Bad() if "reasoning_effort" in kw["json"] else OkStream()
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    assert "".join(llm.chat_stream("s", "u", {"type": "object"})) == "{}"
+    assert ["reasoning_effort" in b for b in sent] == [True, False]
+    assert llm.reasoning_effort() is None, "not sent again to this endpoint"
+    assert llm.provider_info()["reasoningEffort"] == "default"
+
+
+def test_rejected_reasoning_effort_in_json_mode_keeps_the_schema(monkeypatch):
+    use(monkeypatch, GEMINI)
+    sent: list[dict] = []
+
+    class Bad:
+        status_code = 400
+        text = '{"error": {"message": "bad field"}}'
+
+        def json(self):
+            return json.loads(self.text)
+
+    def fake_request(method, url, **kw):
+        sent.append(kw["json"])
+        return Bad() if "reasoning_effort" in kw["json"] else OkJson()
+
+    monkeypatch.setattr(llm.requests, "request", fake_request)
+    assert llm.chat_json("s", "u", {"type": "object"}, "t") == {"ok": True}
+    assert [("reasoning_effort" in b, b["response_format"]["type"]) for b in sent] == [(True, "json_schema"), (False, "json_schema")]

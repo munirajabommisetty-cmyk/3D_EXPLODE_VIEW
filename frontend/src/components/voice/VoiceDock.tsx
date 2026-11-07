@@ -26,26 +26,32 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { EngineeringModelDefinition } from '../../types/models';
 import type { SceneCommandDispatcher } from '../../services/commands/sceneCommandDispatcher';
-import { MicError, startRecording, type ActiveRecording } from '../../services/voice/recorder';
+import { captureProblemMessage } from '../../services/voice/captureMessages';
+import { MicError, startRecording, type ActiveRecording, type RecordingStats } from '../../services/voice/recorder';
 import {
-  getVoiceHealth, synthesize, transcribe, TRANSIENT_VOICE_ERRORS, VoiceServiceError, VOICE_ERROR_MESSAGES, type VoiceLanguage,
+  AUTO_STT_FALLBACK_CODES, getVoiceHealth, sendRecordingDiag, synthesize, transcribe, transcribeAuto, TRANSIENT_VOICE_ERRORS, VoiceServiceError,
+  VOICE_ERROR_MESSAGES, type VoiceLanguage,
 } from '../../services/voice/voiceClient';
 import {
   confirmationCaption, handleVoiceTurn, lexiconFor, previewTurn, type VoiceTurnResult, type VoiceTurnStatus,
 } from '../../services/voice/voiceSession';
 import {
-  autoStartLanguage, interpretedLanguage, transcribeForMode, turnLanguage, type LanguageMode,
+  autoTurnLanguage, interpretedLanguage, transcribeForMode, turnLanguage, type LanguageMode,
 } from '../../services/voice/voiceLanguage';
 import { canonicalPhrase, InterpretError, requestInterpretation } from '../../services/voice/interpretClient';
 import { sharedLlmAvailability } from '../../services/teaching/llmAvailability';
 import { voiceTiming } from '../../services/voice/voiceTiming';
 import { replySpeechCache } from '../../services/voice/ttsCache';
 import { getSceneSnapshot } from '../../services/scene/sceneSnapshot';
-import { reply } from '../../services/voice/voiceReplies';
+import { reply, replyLanguage } from '../../services/voice/voiceReplies';
 import type { ParseOutcome } from '../../services/voice/phraseParser';
 import { TeachingPanel } from './TeachingPanel';
 import { useTeachingSession } from '../../services/teaching/teachingSession';
 import { Icon, type IconName } from '../ui/Icon';
+import { suggestedQuestions } from '../../services/teaching/tutorSuggestions';
+import { buildFallbackQuiz, classifyTutorReply, isBareReply, TutorSession, type TutorAction, type TutorView } from '../../services/teaching/tutorSession';
+import { evaluateAnswer } from '../../services/teaching/tutorClient';
+import { TutorCard } from './TutorCard';
 import './VoiceDock.css';
 
 export interface VoiceDockProps {
@@ -54,6 +60,8 @@ export interface VoiceDockProps {
   allModels: EngineeringModelDefinition[];
   /** Lets other panels (e.g. the inspector) ask the tutor something, as if it had been said. */
   askRef?: React.MutableRefObject<((text: string) => void) | null>;
+  /** The selected part (mouse, assembly tree or point-and-hold gesture): the suggested questions use it. */
+  selectedComponentId?: string | null;
 }
 
 /** Example requests shown when the dock is idle (in the conversation language). */
@@ -66,7 +74,7 @@ const EXAMPLES: Record<string, string[]> = {
 };
 
 type Phase = 'idle' | 'listening' | 'transcribing' | 'speaking';
-type Chip = VoiceTurnStatus | 'error' | 'cancelled' | null;
+type Chip = VoiceTurnStatus | 'error' | 'cancelled' | 'tutor' | null;
 
 /** Used until /api/voice/health answers (same list as the backend). */
 const FALLBACK_LANGUAGES: VoiceLanguage[] = [
@@ -90,15 +98,17 @@ const MIC_MESSAGES: Record<string, string> = {
   MIC_ERROR: 'The microphone could not be started.',
 };
 
+const MUTED_WHILE_LISTENING = 'Microphone is muted by the system (Windows sound settings or the laptop mic key). Unmute it now and speak: I am still listening.';
+
 const CHIP_LABEL: Record<NonNullable<Chip>, string> = {
   executed: 'Done', deferred: 'Waiting until you stop moving the view', rejected: 'Not done', needsInput: 'Need more info',
   answered: 'Answer', unavailable: 'Not available', teach: 'Explaining', control: 'Explanation',
-  error: 'Error', cancelled: 'Cancelled',
+  error: 'Error', cancelled: 'Cancelled', tutor: 'Tutor',
 };
 const CHIP_ICON: Record<NonNullable<Chip>, IconName> = {
   executed: 'check', deferred: 'clock', rejected: 'ban', needsInput: 'message',
   answered: 'info', unavailable: 'ban', teach: 'book', control: 'book',
-  error: 'alert', cancelled: 'stop',
+  error: 'alert', cancelled: 'stop', tutor: 'cap',
 };
 
 function readStoredLanguage(): string {
@@ -110,25 +120,20 @@ function readStoredLanguage(): string {
 }
 
 
-/** Auto-detect is the default; a language picked in the menu is remembered as a manual override. */
-function readStoredMode(): LanguageMode {
-  try {
-    return localStorage.getItem('voice.languageMode') === 'manual' ? 'manual' : 'auto';
-  } catch {
-    return 'auto';
-  }
-}
 
 
-export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allModels, askRef }) => {
+export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allModels, askRef, selectedComponentId }) => {
   const [languages, setLanguages] = useState<VoiceLanguage[]>(FALLBACK_LANGUAGES);
   // The conversation language: replies, teaching and speech use it. In auto mode it follows the
   // detected language of each request; in manual mode it is the pinned menu choice.
   const [language, setLanguage] = useState<string>(readStoredLanguage);
-  const [languageMode, setLanguageMode] = useState<LanguageMode>(readStoredMode);
+  // The spoken language is always detected (no language menu); only the dev hook can pin one
+  const [languageMode, setLanguageMode] = useState<LanguageMode>('auto');
   const [phase, setPhase] = useState<Phase>('idle');
   const [level, setLevel] = useState(0);
   const [transcript, setTranscript] = useState('');
+  // Language of the request shown in "You asked" (from Prisma's detection, else the script)
+  const [transcriptLang, setTranscriptLang] = useState<string | null>(null);
   const [caption, setCaption] = useState('');
   const [chip, setChip] = useState<Chip>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -156,6 +161,15 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
   useEffect(() => {
     teachingRef.current = teaching;
   });
+
+  // Learning session after an explanation: understanding check, two-question quiz, summary
+  const [tutor] = useState(() => new TutorSession({ evaluate: (req) => evaluateAnswer(req) }));
+  const [tutorView, setTutorView] = useState<TutorView>(() => tutor.getView());
+  useEffect(() => tutor.subscribe(setTutorView), [tutor]);
+  // A different model starts a fresh learning session
+  useEffect(() => {
+    tutor.reset();
+  }, [model?.id, tutor]);
 
   const turnRef = useRef(0);
   const recordingRef = useRef<ActiveRecording | null>(null);
@@ -207,7 +221,9 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
 
   /** Speaks a reply with Gnani Timbre. Failures keep the caption and add a short note. */
   const speak = useCallback(async (text: string, turn: number, language?: string) => {
-    const lang = language ?? latest.current.language;
+    // App replies exist in en/te/hi/bn; for other detected languages the reply text is English, so
+    // it is spoken by the English voice (never English text read by a Tamil voice, for example)
+    const lang = replyLanguage(language ?? latest.current.language);
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
     try {
@@ -277,6 +293,30 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     if (result.speak) void speak(result.caption, turn, lang);
   }, [speak]);
 
+  /** Shows and speaks what the tutor says; "explain again" goes back to the teacher with the history. */
+  const applyTutorAction = useCallback((action: TutorAction, turn: number, lang: string): boolean => {
+    if (action.kind === 'pass') return false;
+    if (action.kind === 'stale' || turn !== turnRef.current) return true;
+    setCollapsed(false);
+    setPhase('idle');
+    if (action.kind === 'clarify') {
+      // Not spoken: the clearer explanation starts at once (no two voices at the same time)
+      setCaption(action.text);
+      setChip('teach');
+      // The learner's own words when they say what was unclear ("I didn't understand the
+      // relationship between these parts"), so that is what gets explained; else the whole idea again
+      void teachingRef.current.ask({
+        question: action.question ?? 'Explain that again more simply, step by step, with an everyday example.',
+        questionType: 'explain', targetComponentId: action.targetComponentId, language: lang,
+      });
+      return true;
+    }
+    setCaption(action.text);
+    setChip('tutor');
+    void speak(action.text, turn, lang);
+    return true;
+  }, [speak]);
+
   /**
    * Runs one turn from a transcript (microphone path and dev hook). `spokenLanguage` is the
    * language the audio was understood in; typed text is judged by its script.
@@ -288,6 +328,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     // The conversation continues in the language of the latest request
     if (lang !== uiLang) setLanguage(lang);
     setTranscript(text);
+    setTranscriptLang(text.trim() ? lang : null);
     if (!m) {
       setCaption(reply('VIEWER_NOT_READY', lang));
       setChip('rejected');
@@ -307,6 +348,17 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     }
     const session = teachingRef.current;
     pausedByMicRef.current = false;
+    // An open learning session hears the reply first (yes / explain again / skip / a quiz answer);
+    // anything else falls through and is handled as a normal request
+    if (tutor.isOpen()) {
+      const preview = previewTurn({ transcript: text, dispatcher, model: m, allModels: all, lastDiscussed: lastDiscussedRef.current, teachingActive: session.isActive() });
+      const sceneCommand = preview.kind === 'commands' && !['select', 'focus', 'related', 'ask'].includes(preview.intent);
+      // Naming a different part ("what does the ring gear do?") is a new question, not a reply
+      const newTopic = preview.kind === 'question' && preview.via === 'explicit' && Boolean(preview.partId)
+        && preview.partId !== tutor.targetComponentId;
+      const action = await tutor.handle(text, lang, { sceneCommand, newTopic });
+      if (applyTutorAction(action, turn, lang)) return;
+    }
     const turnInput = {
       language: lang, dispatcher, model: m, allModels: all, speakConfirmations: sayAll,
       lastDiscussed: lastDiscussedRef.current,
@@ -321,6 +373,12 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     if (first.kind !== 'noMatch') {
       // Known commands and questions are handled locally: no LLM interpretation call
       applyResult(handleVoiceTurn({ ...turnInput, transcript: text }), turn, lang, m);
+      return;
+    }
+    // A lone "yes" / "అవును" / "हाँ" with no question waiting: it was heard correctly, so say what
+    // to do next (locally, in the same language) instead of "not understood" or an LLM call
+    if (isBareReply(text) && !session.isActive()) {
+      applyResult({ status: 'needsInput', caption: reply('bareReply', lang), speak: true, outcome: { kind: 'noMatch' }, records: [] }, turn, lang, m);
       return;
     }
     // The LLM is known to be unavailable (quota used up / not configured): say "not understood"
@@ -381,10 +439,10 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
       // Interpretation unavailable (quota, network…): say clearly that it was not understood
       applyResult(handleVoiceTurn({ ...turnInput, transcript: text }), turn, lang, m);
     }
-  }, [dispatcher, speak, applyResult]);
+  }, [dispatcher, speak, applyResult, tutor, applyTutorAction]);
 
   /** Runs one turn from recorded audio (shared by the microphone path and the dev hook). */
-  const runAudio = useCallback(async (wav: Blob, turn: number) => {
+  const runAudio = useCallback(async (wav: Blob, turn: number, stats?: RecordingStats) => {
     setPhase('transcribing');
     setTranscript('');
     setCaption('');
@@ -393,19 +451,44 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     const signal = abortRef.current.signal;
     try {
       const m = latest.current.model;
-      const understood = (t: string) => Boolean(m) && previewTurn({
-        transcript: t, dispatcher, model: m!, allModels: latest.current.allModels,
-        lastDiscussed: lastDiscussedRef.current, teachingActive: teachingRef.current.isActive(),
-      }).kind !== 'noMatch';
+      const understood = (t: string) => Boolean(m) && (
+        previewTurn({
+          transcript: t, dispatcher, model: m!, allModels: latest.current.allModels,
+          lastDiscussed: lastDiscussedRef.current, teachingActive: teachingRef.current.isActive(),
+        }).kind !== 'noMatch'
+        // A reply to the tutor ("yes, quiz me", "skip", a quiz answer) is understood as it is:
+        // no extra Prisma calls in other languages for it
+        || (tutor.isOpen() && !['unclear', 'question'].includes(classifyTutorReply(t, tutor.getView().stage)))
+      );
       const { language: current, languageMode: mode } = latest.current;
       const sttCall = (w: Blob, l: string, sg?: AbortSignal) => {
         voiceTiming.count('stt', turn);
         return transcribe(w, l, sg);
       };
       voiceTiming.mark('sttStart', turn);
-      // Manual: one call in the pinned language. Auto: first call in the conversation language,
-      // the other two only if that transcript is not understood (Stage 1 rules).
-      const { result: heard, outcome } = await transcribeForMode(wav, mode, current, sttCall, understood, signal);
+      let heard: { text: string; language: string };
+      let outcome: string;
+      if (mode === 'auto') {
+        try {
+          // One Prisma v3.0 request: it detects the language (English, Telugu, Hindi, code-mixed…)
+          voiceTiming.count('stt', turn);
+          const keyterms = m ? lexiconFor(m).map((e) => e.displayName) : [];
+          const r = await transcribeAuto(wav, keyterms, signal, undefined, stats ? { ...stats } : undefined);
+          // No detection (e.g. only part names were said): judge by script, else keep the conversation language
+          heard = { text: r.text, language: autoTurnLanguage(r.language, r.text, current) };
+          outcome = r.language ? 'detected' : 'undetected';
+        } catch (autoErr) {
+          if (!AUTO_STT_FALLBACK_CODES.includes((autoErr as VoiceServiceError).code)) throw autoErr;
+          // Prisma v3.0 refused the request: the previous method (Prisma v2.5, retried per language)
+          const res = await transcribeForMode(wav, 'auto', current, sttCall, understood, signal);
+          heard = res.result;
+          outcome = res.outcome;
+        }
+      } else {
+        const res = await transcribeForMode(wav, mode, current, sttCall, understood, signal);
+        heard = res.result;
+        outcome = res.outcome;
+      }
       voiceTiming.mark('transcript', turn);
       voiceTiming.note(outcome, heard.language);
       if (turn !== turnRef.current) return; // cancelled while waiting: never execute stale speech
@@ -414,10 +497,25 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
         // Two languages understood the same recording: ask, rather than guess (no LLM call)
         const lang = heard.language;
         setTranscript(heard.text);
+        setTranscriptLang(null); // two languages fitted: no language claimed
         setCaption(reply('languageUnclear', lang));
         setChip('needsInput');
         setPhase('idle');
         void speak(reply('languageUnclear', lang), turn, lang);
+        return;
+      }
+      if (!heard.text.trim() && stats?.vadOnsetMs != null) {
+        // Speech was detected in the recording but Prisma returned no words: say exactly that (not
+        // the generic "didn't catch that", which is for recordings with nothing in them)
+        if (pausedByMicRef.current) {
+          pausedByMicRef.current = false;
+          teachingRef.current.player.resume();
+        }
+        const lang = latest.current.language;
+        setCaption(reply('heardNoWords', lang));
+        setChip('needsInput');
+        setPhase('idle');
+        void speak(reply('heardNoWords', lang), turn, lang);
         return;
       }
       await runTranscript(heard.text, turn, heard.language);
@@ -436,11 +534,41 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
       }
       setChip('error');
       setPhase('idle');
-      if ((err as VoiceServiceError).code === 'BACKEND_UNAVAILABLE' || (err as VoiceServiceError).code === 'KEY_MISSING') {
+      if (['BACKEND_UNAVAILABLE', 'KEY_MISSING', 'GNANI_AUTH', 'GNANI_FORBIDDEN', 'GNANI_NO_TRANSCRIPT'].includes((err as VoiceServiceError).code)) {
         setNotice((err as Error).message);
       }
     }
-  }, [dispatcher, runTranscript, speak]);
+  }, [dispatcher, runTranscript, speak, tutor]);
+
+  // An explanation finished: the tutor asks whether it made sense (once per topic)
+  const offeredPlanRef = useRef<string | null>(null);
+  useEffect(() => {
+    const st = teaching.state;
+    const plan = st.plan;
+    if (st.status !== 'finished' || !plan || offeredPlanRef.current === plan.planId) return;
+    offeredPlanRef.current = plan.planId;
+    const m = latest.current.model;
+    if (!m || m.id !== plan.modelId) return;
+    const lang = plan.language ?? latest.current.language;
+    const action = tutor.explanationFinished(
+      { modelId: plan.modelId, title: plan.title, targetComponentId: plan.targetComponentId, quiz: plan.quiz },
+      buildFallbackQuiz(m, plan.targetComponentId, lang), lang
+    );
+    if (action) applyTutorAction(action, turnRef.current, lang);
+  }, [teaching.state, tutor, applyTutorAction]);
+
+  /** Tutor buttons: the same transitions as saying "yes" / "explain again" / "skip". */
+  const onTutorChoice = useCallback((choice: 'yes' | 'clarify' | 'skip' | 'close') => {
+    if (choice === 'close') {
+      tutor.reset();
+      return;
+    }
+    const turn = ++turnRef.current;
+    abortRef.current?.abort();
+    stopPlayback();
+    const lang = latest.current.language;
+    void tutor.choose(choice, lang).then((action) => applyTutorAction(action, turn, lang));
+  }, [tutor, applyTutorAction, stopPlayback]);
 
   // Deferred voice commands report later (executed when the hand stops, or expired)
   useEffect(() => {
@@ -493,10 +621,17 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     setTranscript('');
     setCaption('');
     setChip(null);
+    // A previous microphone problem is cleared as the new attempt starts (a muted track reports
+    // itself again during startRecording)
+    setNotice((n) => (n && n.startsWith('Microphone') ? null : n));
     try {
       let rec: ActiveRecording;
       try {
-        rec = await startRecording((l) => setLevel(Math.min(1, l * 8)));
+        rec = await startRecording((l) => setLevel(Math.min(1, l * 8)), (muted) => {
+          // Live: the system muted the microphone. Still listening; unmuting continues the turn
+          if (turn !== turnRef.current) return;
+          setNotice(muted ? MUTED_WHILE_LISTENING : null);
+        });
       } finally {
         startingRef.current = false;
       }
@@ -506,7 +641,6 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
       }
       recordingRef.current = rec;
       setPhase('listening');
-      setNotice((n) => (n && n.startsWith('Microphone') ? null : n));
       const result = await rec.done;
       voiceTiming.mark('recordEnd', turn);
       recordingRef.current = null;
@@ -518,19 +652,29 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
           pausedByMicRef.current = false;
           teachingRef.current.player.resume(); // nothing said: continue the explanation
         }
+        // Not sent to Prisma: its metadata still goes to the diagnostics log (numbers only)
+        if (result.stats && result.reason !== 'cancelled') sendRecordingDiag({ ...result.stats });
+        const problem = captureProblemMessage(result.reason, result.capture?.deviceLabel ?? 'the microphone');
         if (result.reason === 'nospeech') {
           setCaption("I didn't hear anything. Tap the mic and speak.");
           setChip('rejected');
+        } else if (problem) {
+          // A capture fault, named by what was measured (never "say it again"); no Prisma call
+          setCaption(problem);
+          setNotice(problem);
+          setChip('error');
         }
         return;
       }
-      await runAudio(result.wav, turn);
+      await runAudio(result.wav, turn, result.stats);
     } catch (err) {
       setPhase('idle');
       setChip('error');
       const code = err instanceof MicError ? err.code : 'MIC_ERROR';
-      setCaption(MIC_MESSAGES[code]);
-      setNotice(MIC_MESSAGES[code]);
+      // A start-up fault names its exact step (no audio track / audio engine), else the standard text
+      const message = code === 'MIC_ERROR' && err instanceof MicError ? err.message : MIC_MESSAGES[code];
+      setCaption(message);
+      setNotice(message);
     }
   }, [runAudio, stopPlayback]);
 
@@ -583,19 +727,30 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     };
   }, [runTranscript, runAudio]);
 
+  /**
+   * Asks the tutor a typed / clicked question: the same path as speech after transcription (same
+   * parser, dispatcher, teacher and Timbre voice), keeping the conversation language. A new
+   * question replaces the previous turn: its spoken reply stops and its pending request is
+   * abandoned, so two answers never overlap.
+   */
+  const askText = useCallback((text: string) => {
+    if (recordingRef.current || startingRef.current) return; // the microphone turn wins
+    setCollapsed(false);
+    const turn = ++turnRef.current;
+    abortRef.current?.abort();
+    stopPlayback();
+    voiceTiming.begin(turn);
+    void runTranscript(text, turn, latest.current.language);
+  }, [runTranscript, stopPlayback]);
+
   // Other panels can ask the tutor (same path as speech; keeps the current conversation language)
   useEffect(() => {
     if (!askRef) return;
-    askRef.current = (text: string) => {
-      setCollapsed(false);
-      const turn = ++turnRef.current;
-      voiceTiming.begin(turn);
-      void runTranscript(text, turn, latest.current.language);
-    };
+    askRef.current = askText;
     return () => {
       askRef.current = null;
     };
-  }, [askRef, runTranscript]);
+  }, [askRef, askText]);
 
   // Keyboard: "M" starts / stops listening (not while typing in a field)
   useEffect(() => {
@@ -620,6 +775,10 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
   }, [stopPlayback]);
 
   const busy = phase !== 'idle' || teaching.pending;
+  // The part questions are about: the current selection, else the conversation topic
+  const selectedName = selectedComponentId && model ? model.getComponentMetadata(selectedComponentId)?.name ?? null : null;
+  const topicPartName = topic && model && topic.modelId === model.id ? model.getComponentMetadata(topic.componentId)?.name ?? null : null;
+  const suggestions = language === 'en-IN' ? suggestedQuestions(selectedName ?? topicPartName) : null;
   const teachStatus = teaching.state.status;
   const explaining = teachStatus === 'running' || teachStatus === 'paused' || teachStatus === 'waitingForUser';
   const teachDone = !teaching.pending && (teachStatus === 'finished' || teachStatus === 'cancelled' || teachStatus === 'failed');
@@ -628,13 +787,18 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     phase === 'listening' ? { key: 'listening', icon: 'mic', text: 'Listening… I stop when you stop' }
       : phase === 'transcribing' ? { key: 'processing', icon: 'loader', text: 'Understanding…' }
         : teaching.pending ? { key: 'processing', icon: 'loader', text: 'Preparing the explanation…' }
+          : tutorView.stage === 'evaluating' ? { key: 'processing', icon: 'loader', text: 'Checking your answer…' }
           : teachStatus === 'paused' ? { key: 'interrupted', icon: 'pause', text: 'Explanation paused — say “continue” or ask something else' }
             : teachStatus === 'waitingForUser' ? { key: 'interrupted', icon: 'clock', text: 'Waiting — say “continue” when ready' }
               : teachStatus === 'running' ? { key: 'speaking', icon: 'speaker', text: `Explaining — step ${teaching.state.stepPosition + 1} of ${teaching.state.stepCount}` }
                 : phase === 'speaking' ? { key: 'speaking', icon: 'speaker', text: 'Speaking…' }
+                : tutorView.stage === 'quiz' ? { key: 'idle', icon: 'mic', text: `Question ${tutorView.questionIndex + 1} of 2 — tap the mic (or press M) and answer` }
+                : tutorView.stage === 'checking' ? { key: 'idle', icon: 'mic', text: 'Did that make sense? Tap the mic (or press M) and say yes, explain again, or skip' }
                   : chip === 'error' ? { key: 'error', icon: 'alert', text: 'Something went wrong — see below' }
                     : teachDone && teachStatus === 'finished' ? { key: 'done', icon: 'check', text: 'Explanation complete — ask a follow-up' }
-                      : { key: 'idle', icon: 'mic', text: 'Tap the mic (or press M) and ask' };
+                      : selectedName
+                        ? { key: 'idle', icon: 'mic', text: `${selectedName} selected — tap the mic (or press M) and ask about it` }
+                        : { key: 'idle', icon: 'mic', text: 'Tap the mic (or press M) and ask' };
   const topicName = topic && model && topic.modelId === model.id
     ? lexiconFor(model).find((e) => e.componentId === topic.componentId)?.displayName ?? null
     : null;
@@ -646,31 +810,11 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
     : phase === 'transcribing' || teaching.pending ? 'thinking'
       : phase === 'speaking' || teachStatus === 'running' ? 'speaking'
         : 'idle';
+  // No language menu: Prisma detects the spoken language; this only shows what it heard last
   const languageSelect = (
-    <select
-      className="voice-lang"
-      value={languageMode === 'auto' ? 'auto' : language}
-      onChange={(e) => {
-        const v = e.target.value;
-        if (v === 'auto') {
-          setLanguageMode('auto');
-          setLanguage((cur) => autoStartLanguage(cur));
-        } else {
-          setLanguageMode('manual');
-          setLanguage(v);
-        }
-      }}
-      aria-label="Voice language (auto-detect, or pick one to pin it)"
-      title={languageMode === 'auto' ? 'Detects English, Telugu or Hindi from your speech' : 'Pinned language (choose Auto-detect to detect it)'}
-      disabled={busy}
-    >
-      <option value="auto">Auto · {languageInfo.native}</option>
-      {languages.map((l) => (
-        <option key={l.code} value={l.code}>
-          {l.native}{l.status === 'beta' ? ' (beta)' : ''}
-        </option>
-      ))}
-    </select>
+    <span className="voice-lang-auto" title="Speak in any language: it is detected automatically" aria-label={`Language: detected automatically (now ${languageInfo.name})`}>
+      <Icon name="message" size={12} /> {languageInfo.native}
+    </span>
   );
 
   return (
@@ -682,25 +826,31 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
             <span className="voice-title"><Icon name="cap" size={15} /> Voice tutor</span>
             {languageSelect}
           </div>
-          {languageMode === 'manual' && languageInfo.status === 'beta' && (
+          {languageInfo.status === 'beta' && (
             <div className="voice-beta">
               {languageInfo.code === 'bn-IN'
-                ? 'Bengali is in beta: eight tested commands and Bengali replies; other commands are not understood yet, and it has not been tested with real voices.'
-                : `${languageInfo.name} is in beta: speech recognition works, but commands use English words and replies are in English.`}
+                ? 'Bengali (beta): explanations and short replies in Bengali; only some spoken commands are understood.'
+                : `${languageInfo.name} (beta): explanations are in ${languageInfo.name}; short replies and commands use English.`}
             </div>
           )}
           {notice && <div className="voice-notice" role="alert">{notice}</div>}
           {topicName && <div className="voice-topic"><span>Topic</span>{topicName}</div>}
-          {!transcript && !caption && !teaching.plan && !teaching.pending && (
-            <div className="voice-examples" aria-label="Things you can say">
-              <span>Try saying</span>
-              {examples.map((ex) => <q key={ex}>{ex}</q>)}
+          <TutorCard view={tutorView} onChoice={onTutorChoice} busy={busy} />
+          {!teaching.pending && !explaining && tutorView.stage === 'idle' && !(teachDone && (teaching.plan?.followUpSuggestions.length ?? 0) > 0) && (
+            <div className="voice-examples" aria-label="Things you can ask">
+              <span>{transcript || caption ? 'Ask next — say it or click' : 'Try saying (or click)'}</span>
+              {(suggestions ?? examples).map((ex) => (
+                <button type="button" key={ex} className="voice-suggestion" onClick={() => askText(ex)} disabled={busy}>
+                  {ex}
+                </button>
+              ))}
             </div>
           )}
           {transcript && (
-            <div className="voice-transcript voice-bubble-user" key={`t-${transcript}`}><span className="bubble-role">You asked</span>“{transcript}”</div>
+            <div className="voice-transcript voice-bubble-user" key={`t-${transcript}`}><span className="bubble-role">You asked{transcriptLang ? ` · ${FALLBACK_LANGUAGES.find((l) => l.code === transcriptLang)?.name ?? transcriptLang}` : ''}</span>“{transcript}”</div>
           )}
-          {(caption || chip) && (
+          {/* While an explanation plays, the step panel below is the answer: no stale "Preparing…" bubble */}
+          {(caption || chip) && !(chip === 'teach' && explaining) && (
             <div className={`voice-caption voice-bubble-tutor chip-${chip ?? 'none'}`} aria-live="polite" key={`c-${caption}-${chip}`}>
               {/* A finished explanation no longer says "Preparing…": the line shows how it ended */}
               {chip && (
@@ -712,7 +862,13 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
               <span>{chip === 'teach' && teachDone ? (teachStatus === 'finished' ? 'The explanation is complete. Ask a follow-up question.' : 'The explanation was stopped.') : caption}</span>
             </div>
           )}
-          <TeachingPanel session={teaching} language={language} />
+          <TeachingPanel
+            session={teaching}
+            language={language}
+            nameOf={(id) => model?.getComponentMetadata(id)?.name}
+            onAsk={askText}
+            askDisabled={busy}
+          />
           <label className="voice-toggle">
             <input type="checkbox" checked={speakAll} onChange={(e) => setSpeakAll(e.target.checked)} />
             Speak every reply (otherwise only problems are spoken)
@@ -751,7 +907,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({ dispatcher, model, allMode
           <div className="voice-status" aria-live="polite">
             <span className="voice-state-icon" aria-hidden="true"><Icon name={agentState.icon} size={14} /></span> {agentState.text}
           </div>
-          {collapsed && <div className="voice-bar-lang">{languageSelect}</div>}
+
         </div>
 
         {(busy || explaining) && (

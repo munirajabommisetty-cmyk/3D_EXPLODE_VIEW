@@ -22,6 +22,7 @@ import type { GestureRecognitionResult } from '../../types/gestures';
 import type { HandLandmarkResult } from '../../types/landmarks';
 import { defaultTelemetry, type TelemetrySnapshot } from '../../utils/telemetry';
 import { Icon } from '../ui/Icon';
+import { handFrameStore } from '../../services/tracking/handFrameStore';
 import './ViewerCanvas.css';
 
 export interface ViewerCanvasProps {
@@ -129,6 +130,14 @@ export const ViewerCanvas: React.FC<ViewerCanvasProps> = ({
   useEffect(() => {
     handsRef.current = hands ?? [];
   }, [hands]);
+
+  // Hand-tracking performance pass: every tracked frame arrives through the hand-frame store
+  // (published by the webcam panel), so the props above only change when the UI-visible hand state
+  // changes and a camera frame no longer re-renders the workspace.
+  useEffect(() => handFrameStore.subscribe((frame) => {
+    handsRef.current = frame.hands;
+    gestureResultRef.current = frame.gesture;
+  }), []);
 
   // Synchronize selection state and callbacks
   const selectedComponentIdRef = useRef<string | null>(selectedComponentId ?? null);

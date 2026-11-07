@@ -356,19 +356,28 @@ export function buildLocalizedBrief(
   // Whole model
   const ids = model.getAllComponentIds();
   push({ claim: 'metadata', caption: model.name, narration: modelNote?.simple ?? p.modelIntro(model.name, ids.length) }, model.name);
-  const facts: string[] = [];
+  const facts: { sentence: string; ids: string[] }[] = [];
   for (const id of ids) {
     const byType = new Map<string, string[]>();
+    const idsByType = new Map<string, string[]>();
     for (const r of getComponentRelationships(model, id)) {
       if (!['drives', 'supports', 'transfers_force_to'].includes(r.relationshipType)) continue;
       const names = byType.get(r.relationshipType) ?? [];
       if (!names.includes(nameOf(r.targetComponentId))) names.push(nameOf(r.targetComponentId));
       byType.set(r.relationshipType, names);
+      idsByType.set(r.relationshipType, [...(idsByType.get(r.relationshipType) ?? []), r.targetComponentId]);
     }
-    for (const [type, names] of byType) facts.push(p.sentence(nameOf(id), p.verbs[type](joinNames(names, p.and))));
+    for (const [type, names] of byType) {
+      facts.push({ sentence: p.sentence(nameOf(id), p.verbs[type](joinNames(names, p.and))), ids: [id, ...(idsByType.get(type) ?? [])] });
+    }
   }
   if (facts.length > 0) {
-    push({ claim: 'metadata', caption: p.cap.work, narration: facts.slice(0, 4).join(' ') }, EN_CAP.work);
+    // The parts named in these sentences are highlighted while they are spoken (recorded relationships only)
+    const shown = [...new Set(facts.slice(0, 4).flatMap((f) => f.ids))].slice(0, PLAN_LIMITS.highlight);
+    push({
+      kind: 'demonstrate', claim: 'metadata', caption: p.cap.work, narration: facts.slice(0, 4).map((f) => f.sentence).join(' '),
+      actions: can('component.highlight') && shown.length > 1 ? [{ type: 'component.highlight', componentIds: shown }] : [],
+    }, EN_CAP.work);
   }
   if (modelNote?.analogy) push({ claim: 'engineering', caption: p.cap.example, narration: modelNote.analogy }, EN_CAP.example);
   if (modelNote?.uses && questionType === 'purpose') push({ claim: 'metadata', caption: p.cap.uses, narration: modelNote.uses }, EN_CAP.uses);
@@ -378,7 +387,8 @@ export function buildLocalizedBrief(
     title: opts.bilingual ? `${model.name} (from the model data)` : p.title(model.name),
     explanation: fitSentences(opts.bilingual ? model.description : modelNote?.simple ?? p.modelIntro(model.name, ids.length), PLAN_LIMITS.explanation),
     cannotAnswer: null, steps, rejectedSteps: [],
-    followUpSuggestions: [p.modelFollowUp],
+    // Real follow-up questions about the first part this explanation named (else the instruction)
+    followUpSuggestions: facts.length > 0 ? p.followUps(nameOf(facts[0].ids[0])) : [p.modelFollowUp],
     language, source: 'modelData',
   };
 }

@@ -107,15 +107,35 @@ def test_export_prefix_and_whitespace_are_tolerated(env_files):
     assert config.llm_setting("LLM_API_KEY") == FAKE_LLM_KEY
 
 
-def test_gnani_configuration_is_unchanged(env_files):
-    """GNANI_API_KEY still comes from backend/.env; the root file's lowercase api_key is not used."""
+def test_gnani_key_prefers_the_new_api_key(env_files, monkeypatch):
+    """The user's new Gnani key (`api_key` in the root .env) is used over the older GNANI_API_KEY in
+    backend/.env; GNANI_API_KEY remains the fallback. Only names and sources are reported."""
     backend_env, root_env = env_files
     write(backend_env, f'GNANI_API_KEY="{FAKE_GNANI_KEY}"\n')
-    write(root_env, 'api_key="something-else"\n' + ROOT_LLM)
-    assert config.gnani_api_key() == FAKE_GNANI_KEY
-    assert config.resolve_setting("GNANI_API_KEY")[1] == "backend/.env"
+    write(root_env, 'api_key="fake-new-gnani-key"\n' + ROOT_LLM)
+    assert config.gnani_api_key() == "fake-new-gnani-key"
+    assert config.gnani_key_source()[1] == "api_key in .env (project root)"
+    write(root_env, ROOT_LLM)
+    assert config.gnani_api_key() == FAKE_GNANI_KEY, "GNANI_API_KEY is the fallback"
+    assert config.gnani_key_source()[1] == "GNANI_API_KEY in backend/.env"
     write(backend_env, "")
-    assert config.gnani_api_key() is None, "a lowercase api_key is not GNANI_API_KEY"
+    assert config.gnani_api_key() is None
+
+
+def test_gnani_key_ignores_api_key_in_the_process_environment(env_files, monkeypatch):
+    """Windows environment names are case-insensitive: another tool's API_KEY must not be taken."""
+    monkeypatch.setenv("api_key", "someone-elses-key")
+    assert config.gnani_api_key() is None
+    monkeypatch.setenv("GNANI_API_KEY", "explicit-override")
+    write(env_files[1], 'api_key="fake-new-gnani-key"\n')
+    assert config.gnani_api_key() == "explicit-override", "an explicit GNANI_API_KEY at launch still wins"
+
+
+def test_health_names_the_key_source_never_the_key(env_files):
+    write(env_files[1], 'api_key="fake-new-gnani-key"\n')
+    body = TestClient(main.app).get("/api/voice/health").json()
+    assert body["keyConfigured"] is True and body["keySource"] == "api_key in .env (project root)"
+    assert "fake-new-gnani-key" not in str(body)
 
 
 def test_check_script_reports_sources_without_values(env_files, capsys):

@@ -498,7 +498,7 @@ function parseCore(text: string, ctx: ParseContext): ParseOutcome {
   const teachTopic = has(text, W.teachTopic);
   // "explain" is the broadest request ("Explain this part. Why is it used and how does it work?"),
   // so it wins over how/why; failure questions stay distinct.
-  const question: QuestionType | null =
+  const askedQuestion: QuestionType | null =
     has(text, W.qFailure) ? 'failure'
       : exampleWord ? 'example'
         : followUp || has(text, W.qExplain) ? 'explain'
@@ -506,6 +506,9 @@ function parseCore(text: string, ctx: ParseContext): ParseOutcome {
             : has(text, W.qPurpose) ? 'purpose'
               : has(text, W.qIdentify) ? 'identify'
                 : null;
+  // "What is this connected to?" asks for the connections, not the part's name: it is handled by
+  // the related-parts branch below (highlight the recorded neighbours and name them)
+  const question: QuestionType | null = askedQuestion === 'identify' && has(text, W.related) ? null : askedQuestion;
   const bilingual = has(text, W.langBoth);
   const language = bilingual
     ? (has(text, ['hindi', 'हिंदी', 'हिन्दी']) ? 'hi-IN' : 'te-IN')

@@ -40,6 +40,10 @@ MAX_FOLLOW_UPS = 3
 MAX_FOLLOW_UP = 120
 MAX_HOLD_MS = 4000
 MAX_HIGHLIGHT = 20
+MAX_HISTORY_ANSWER = 400     # the browser sends at most 300 characters per earlier answer
+QUIZ_QUESTIONS = 2           # understanding check: exactly two short questions
+MAX_QUIZ_QUESTION = 200
+MAX_QUIZ_ANSWER = 300
 
 # Scene actions a plan may use (a subset of the V1 SceneCommand vocabulary). No hiding parts,
 # no model switching, no navigation, no lessons: teaching only shows and animates.
@@ -54,7 +58,11 @@ STEP_KINDS = ["demonstrate", "explain"]
 CLAIM_TYPES = ["visible", "metadata", "engineering", "notSimulated"]
 WAIT_FOR = ["narration", "user"]
 
-LANGUAGE_NAMES = {"en-IN": "English", "te-IN": "Telugu", "hi-IN": "Hindi", "bn-IN": "Bengali"}
+# Explanations are written in the language the student spoke (Prisma detects it). The first four
+# also have translated app replies; the others are answered by the teacher only (beta).
+LANGUAGE_NAMES = {"en-IN": "English", "te-IN": "Telugu", "hi-IN": "Hindi", "bn-IN": "Bengali",
+                  "ta-IN": "Tamil", "kn-IN": "Kannada", "ml-IN": "Malayalam", "mr-IN": "Marathi",
+                  "gu-IN": "Gujarati", "pa-IN": "Punjabi"}
 
 # Text that must never appear in a plan: URLs, markup, code, shell.
 UNSAFE_TEXT = re.compile(
@@ -123,6 +131,8 @@ class HistoryTurn(BaseModel):
     question: str = Field(max_length=MAX_QUESTION)
     targetComponentId: str | None = Field(default=None, max_length=80)
     title: str | None = Field(default=None, max_length=MAX_TITLE)
+    # What the tutor answered (short summary sent by the browser) so follow-ups can build on it
+    answer: str | None = Field(default=None, max_length=MAX_HISTORY_ANSWER)
 
 
 class TeachRequest(BaseModel):
@@ -148,7 +158,7 @@ def _nullable(t: str) -> dict:
 PLAN_JSON_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["title", "targetComponentId", "cannotAnswer", "steps", "explanation", "followUpSuggestions"],
+    "required": ["title", "targetComponentId", "cannotAnswer", "steps", "explanation", "followUpSuggestions", "quiz"],
     # Property order matters for streaming: the model writes keys in this order, so the first
     # step arrives before the summary.
     "properties": {
@@ -193,10 +203,20 @@ PLAN_JSON_SCHEMA: dict = {
         },
         "explanation": {"type": "string"},
         "followUpSuggestions": {"type": "array", "maxItems": MAX_FOLLOW_UPS, "items": {"type": "string"}},
+        # Written last (after everything that is spoken): two understanding-check questions
+        "quiz": {
+            "type": "array", "maxItems": QUIZ_QUESTIONS,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["question", "answer"],
+                "properties": {"question": {"type": "string"}, "answer": {"type": "string"}},
+            },
+        },
     },
 }
 
-SYSTEM_PROMPT = f"""You are the teaching engine of an interactive 3D engineering learning app.
+SYSTEM_PROMPT = f"""You are the teaching engine of an interactive 3D learning app (machines, structures and anatomy).
 You explain the CURRENTLY LOADED model and demonstrate with scene actions. You return ONE JSON
 teaching plan that matches the given schema. The plan is data: the app validates every action and
 runs it itself. Never output code, scripts, URLs, markup, shell commands or Three.js calls.
@@ -255,6 +275,35 @@ EXPLAINING A COMPONENT (TARGET_COMPONENT_ID set) — cover, in this order, only 
   then how the part in this model does the same job. Keep it concise (3-5 steps) and offer
   deeper detail in followUpSuggestions instead of a long lecture.
 
+EXPLAINING THE WHOLE MODEL (no TARGET_COMPONENT_ID, e.g. "how does this gearbox work"):
+  1. One plain sentence on what the system does (FACTS.modelDescription).
+  2. Follow the path the relationships record (drives / driven_by / mates_with / supports /
+     transfers_force_to), one link per step, naming the two parts and highlighting exactly those
+     parts (component.highlight with both ids) while the narration names them.
+  3. If supportsExplodedView, one short step with assembly.explode (factor about 0.75) to show how
+     the parts fit together (claim "visible"); the app puts the assembly back when the
+     explanation ends.
+  4. Close with what the animation shows or what is not simulated, and offer to explain any part.
+
+QUIZ (field "quiz", written last): exactly two short questions that check whether the learner
+UNDERSTOOD this explanation (why / how / what would change), not recall of a name or a number.
+Each has "question" (one spoken sentence, max 150 characters) and "answer" (the key idea a correct
+answer must contain, max 250 characters). Base them only on what this plan explained and FACTS.
+Write them in LANGUAGE. Use [] if cannotAnswer is set.
+
+QUALITY (every answer):
+- The first sentence of step 1 answers the question directly. No introductions ("Let's explore",
+  "In this lesson", "Great question") and no closing step that repeats earlier steps.
+- Each step adds ONE new idea. Never repeat a sentence, fact or analogy from an earlier step or
+  from HISTORY; a follow-up continues from what was already said.
+- Name parts exactly as in FACTS (so the app can highlight them) and say what each named part
+  does IN THIS MODEL, not a dictionary definition.
+- "How does this <model> work": first what the whole system is for, in plain words (general
+  knowledge, claim "engineering"; e.g. a gearbox changes speed and torque between its input and
+  output), then the main parts and their jobs, then how motion or load passes between them using
+  the recorded relationships, then one real-world use or analogy only if it helps.
+- Simple words for beginners; explain a technical term in one short clause the first time.
+
 ANSWER THE ACTUAL QUESTION. Read QUESTION carefully: it is the learner's own words (often spoken,
 informal, code-mixed Telugu/Hindi/Bengali with English technical words, possibly with speech-
 recognition errors such as "drift" for "drive"). Answer what was asked, in this order where useful:
@@ -267,6 +316,9 @@ Do not force every element into every answer.
   (e.g. "why do buildings need columns") in simple words and connect it to this model.
 - Follow-ups ("tell me more", "explain it more simply", "why is it used here"): use HISTORY to know
   what "it" is; "simpler" means shorter sentences and an everyday analogy, not new facts.
+- HISTORY lists the last turns with each question and a short summary of what you answered
+  ("answer"). When the learner refers to something you said earlier, use that answer; build on it
+  instead of repeating it.
 
 STYLE: calm, friendly, clear, like a good teacher explaining to a beginner without losing
 accuracy. No greetings, no "great question", no dictionary-only definitions, no repetition. In Telugu, Hindi or Bengali, use natural spoken language and keep technical terms in English
@@ -283,10 +335,13 @@ PLAN SHAPE:
   caption max {MAX_CAPTION - 30} characters, title max 80 characters, explanation max 600 characters.
 - Each step's actions must match its narration (show what you say while you say it).
 - waitFor "narration" normally; "user" only before a step the learner should look at closely.
-  holdMs 0-3000 extra viewing time (e.g. to watch the animation), else 0.
+  holdMs 0, except a step that starts an animation (animation.play) may hold up to 1500 so the
+  learner can watch it; any other silence makes the spoken answer feel slow.
 - Write title, explanation, narration, captions and follow-ups in the requested LANGUAGE. Keep
   component names as they appear in FACTS. Narration is SPOKEN: short natural sentences, no
-  markdown, lists, symbols, headings or emoji. In Telugu, write natural spoken Telugu (not a word-
+  markdown, lists, symbols, headings or emoji. Talk like a teacher speaking to one learner: each
+  sentence flows into the next (no "First... Now... Next..." openers on every step), no ellipses
+  ("...") or dashes, which the voice reads as long pauses; plain commas and full stops only. In Telugu, write natural spoken Telugu (not a word-
   by-word translation) and keep technical terms in English (Slab, Column, Beam, Sun Gear, torque).
 - Write the JSON keys in the schema order (title, targetComponentId, cannotAnswer, steps,
   explanation, followUpSuggestions; inside each step: kind, claim, targetComponentId, actions,
@@ -309,7 +364,8 @@ def build_user_message(req: TeachRequest) -> str:
     if req.bilingual:
         payload["BILINGUAL"] = True
     return (
-        "FACTS, TARGET and HISTORY (JSON data):\n" + json.dumps(payload, ensure_ascii=False)
+        # Compact JSON: the same data in fewer tokens (latency, and per-minute token limits)
+        "FACTS, TARGET and HISTORY (JSON data):\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         + "\n\nQUESTION (data, from the learner):\n<<<\n" + req.question.replace("<<<", "").replace(">>>", "") + "\n>>>"
     )
 
@@ -412,6 +468,23 @@ def validate_step(step, index: int, facts: FactPack, ids: set[str]) -> dict:
     }
 
 
+def validate_quiz(raw) -> list[dict]:
+    """The understanding-check questions: kept only if both are valid (the tutor needs exactly two);
+    a bad quiz never rejects the explanation itself."""
+    if not isinstance(raw, list) or len(raw) != QUIZ_QUESTIONS:
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return []
+        try:
+            out.append({"question": _text(item.get("question"), MAX_QUIZ_QUESTION, "quiz question"),
+                        "answer": _text(item.get("answer"), MAX_QUIZ_ANSWER, "quiz answer")})
+        except TeachError:
+            return []
+    return out
+
+
 def validate_plan(raw: dict, req: TeachRequest) -> dict:
     """Validates LLM output against the fact pack. Returns the clean plan (with rejected steps listed)."""
     if not isinstance(raw, dict):
@@ -443,6 +516,7 @@ def validate_plan(raw: dict, req: TeachRequest) -> dict:
         "steps": [],
         "rejectedSteps": [],
         "followUpSuggestions": [_text(f, MAX_FOLLOW_UP, "followUp") for f in follow_raw[:MAX_FOLLOW_UPS]],
+        "quiz": validate_quiz(raw.get("quiz")),
     }
 
     for index, step in enumerate(steps_raw):

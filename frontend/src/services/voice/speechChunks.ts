@@ -32,6 +32,10 @@ export function speakableText(text: string): string {
     .replace(/^\s*(?:[-*•]|\d+[.)])\s+/gm, '')
     .replace(/(\*\*|__|\*|_|~~)(?=\S)([^*_~]+?)\1/g, '$2')
     .replace(/[*#_~>|]+/g, ' ')
+    // Ellipses and dashes are read as long hesitations ("First... we need"): a comma pause instead
+    .replace(/\s*(?:\.{3,}|…)\s*(?=\S)/g, ', ')
+    .replace(/\s+[—–-]{1,2}\s+/g, ', ')
+    .replace(/,(\s*,)+/g, ',')
     .replace(/\s+/g, ' ')
     .trim();
 }

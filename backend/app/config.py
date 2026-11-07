@@ -17,6 +17,10 @@ PROJECT_DIR = BACKEND_DIR.parent
 ENV_FILE = BACKEND_DIR / ".env"
 ENV_FILES: tuple[Path, ...] = (ENV_FILE, PROJECT_DIR / ".env")  # earlier file wins
 KEY_NAME = "GNANI_API_KEY"
+# The user's current Gnani key, added as `api_key` in a .env file. Read from the .env files only:
+# Windows environment names are case-insensitive, so the process environment's API_KEY (another
+# tool's) must never be mistaken for it.
+FILE_KEY_NAME = "api_key"
 
 GNANI_BASE_URL = "https://api.vachana.ai"
 STT_PATH = "/stt/v3"
@@ -43,6 +47,16 @@ MAX_AUDIO_BYTES = 2 * 1024 * 1024        # ~60 s of 16 kHz mono WAV; recorder ca
 MAX_TTS_CHARS = 400
 REQUEST_TIMEOUT_S = 20
 ALLOWED_AUDIO_TYPES = {"audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"}
+
+# Automatic language detection (docs.gnani.ai, Prisma v3.0, read 6 Nov 2026): model "prisma-v3.0"
+# with language_code "indic-auto" returns detected_language_code (judged from the script of the
+# transcript). "codemix" keeps English words in Latin script inside Telugu / Hindi sentences, so
+# technical terms ("Sun Gear", "torque") reach the app as they were said. v2.5 cannot detect.
+AUTO_LANGUAGE = "auto"
+STT_AUTO_MODEL = "prisma-v3.0"
+STT_AUTO_LANGUAGE_CODE = "indic-auto"
+STT_AUTO_FORMAT = "codemix"
+MAX_KEYTERMS = 60
 
 # Words Prisma should listen harder for (single words, letters only — per Gnani docs)
 STT_BIAS_WORDS = ["zoom", "rotate", "explode", "assembly", "select", "gear", "carrier", "shaft", "animation"]
@@ -83,9 +97,24 @@ def setting_sources(names) -> dict[str, str | None]:
     return {name: resolve_setting(name)[1] for name in names}
 
 
+def gnani_key_source() -> tuple[str | None, str | None]:
+    """(value, "NAME in source") of the Gnani key. Order: GNANI_API_KEY in the process environment
+    (explicit override), then `api_key` in backend/.env or the root .env, then GNANI_API_KEY in
+    those files. Never log the value."""
+    env_value = os.environ.get(KEY_NAME, "").strip()
+    if env_value:
+        return env_value, f"{KEY_NAME} in environment"
+    for name in (FILE_KEY_NAME, KEY_NAME):
+        for path in ENV_FILES:
+            value = _parse_env_file(path).get(name)
+            if value:
+                return value, f"{name} in {_describe(path)}"
+    return None, None
+
+
 def gnani_api_key() -> str | None:
     """The configured key, or None. Never log or return this value."""
-    return resolve_setting(KEY_NAME)[0]
+    return gnani_key_source()[0]
 
 
 # --- Teaching LLM (Task V4): any OpenAI-compatible endpoint; the project uses Gemini. ---
@@ -112,4 +141,6 @@ def llm_configured() -> dict[str, bool]:
 #   LLM_EVON_THINKING   "on" | "off". Used only when LLM_PROVIDER=evon: sends
 #                       chat_template_kwargs.enable_thinking (Evon model card, vLLM / SGLang serving).
 LLM_PROVIDERS = ("gemini", "evon", "openai_compatible")
-LLM_OPTION_SETTINGS = ("LLM_PROVIDER", "LLM_EVON_THINKING")
+#   LLM_REASONING_EFFORT "minimal" | "low" | "medium" | "high" | "default". Gemini only; unset means
+#                       "low" (see llm.reasoning_effort). "default" sends nothing (the model's own level).
+LLM_OPTION_SETTINGS = ("LLM_PROVIDER", "LLM_EVON_THINKING", "LLM_REASONING_EFFORT")

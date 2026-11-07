@@ -79,6 +79,48 @@ def provider_extra_body() -> dict:
     return {"chat_template_kwargs": {"enable_thinking": thinking_setting() == "on"}}
 
 
+# Gemini's thinking level (OpenAI-compatible `reasoning_effort`). Measured live on 6 Nov 2026 with
+# no setting (the model's default, highest level): first token 14.1 s for a short spoken answer,
+# 14-15.7 s for a quiz-answer check, one timeout at 21 s. Google's OpenAI-compatibility page maps
+# reasoning_effort minimal/low/medium/high to Gemini 3 Flash thinking levels; thinking cannot be
+# switched off for Gemini 3 models. "low" keeps some reasoning for the JSON lesson plans.
+REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+DEFAULT_GEMINI_EFFORT = "low"
+# (base URL, model) pairs whose endpoint rejected reasoning_effort (400): never sent to them again.
+_EFFORT_REJECTED: set[tuple[str, str]] = set()
+
+
+def _endpoint() -> tuple[str, str]:
+    return (config.llm_setting("LLM_BASE_URL") or "").rstrip("/"), config.llm_setting("LLM_MODEL") or ""
+
+
+def reasoning_effort() -> str | None:
+    """The reasoning_effort sent to Gemini: LLM_REASONING_EFFORT if valid, "default" = not sent,
+    otherwise "low". Never sent to other providers, nor to an endpoint that rejected it."""
+    if provider() != "gemini" or _endpoint() in _EFFORT_REJECTED:
+        return None
+    value = (config.llm_setting("LLM_REASONING_EFFORT") or "").strip().lower()
+    if value == "default":
+        return None
+    return value if value in REASONING_EFFORTS else DEFAULT_GEMINI_EFFORT
+
+
+def request_extras() -> dict:
+    """All optional request fields: Evon's thinking switch and Gemini's reasoning_effort."""
+    effort = reasoning_effort()
+    return {**provider_extra_body(), **({"reasoning_effort": effort} if effort else {})}
+
+
+def _effort_rejected(exc_or_status) -> bool:
+    """A 400 for a request that carried reasoning_effort: remember and retry once without it."""
+    bad = exc_or_status == 400 or getattr(exc_or_status, "code", None) == "LLM_BAD_REQUEST"
+    if bad and reasoning_effort():
+        _EFFORT_REJECTED.add(_endpoint())
+        _timing.warning("llm reasoning_effort rejected by the endpoint: retrying without it")
+        return True
+    return False
+
+
 def provider_info() -> dict:
     """Safe diagnostics: provider, model id, endpoint host and the thinking option. Never the key,
     the full URL (it could carry a path or query), or any header."""
@@ -88,6 +130,7 @@ def provider_info() -> dict:
         "model": model_name(),
         "endpointHost": urlparse(base).hostname if base else None,
         "thinking": thinking_setting() if provider() == "evon" else "notApplicable",
+        "reasoningEffort": reasoning_effort() or "default",
     }
 
 
@@ -158,20 +201,25 @@ def chat_stream(system: str, user: str, schema: dict, connect_timeout: float = 8
     status = "error"
     resp: requests.Response | None = None
     try:
-        try:
-            resp = requests.post(
-                base + "/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={"model": model, "messages": object_mode_messages(system, user, schema), "temperature": 0.2,
-                      "response_format": {"type": "json_object"}, "stream": True, **provider_extra_body()},
-                stream=True, timeout=(connect_timeout, idle_timeout),
-            )
-        except requests.Timeout as exc:
-            status = "timeout"
-            raise LLMError("LLM_TIMEOUT", "The teaching model took too long to answer.", 504) from exc
-        except requests.RequestException as exc:
-            raise LLMError("LLM_UNREACHABLE", "The server could not reach the teaching model.", 502) from exc
-        status = str(resp.status_code)
+        for _attempt in range(2):  # a second attempt only when reasoning_effort was rejected
+            try:
+                resp = requests.post(
+                    base + "/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": model, "messages": object_mode_messages(system, user, schema), "temperature": 0.2,
+                          "response_format": {"type": "json_object"}, "stream": True, **request_extras()},
+                    stream=True, timeout=(connect_timeout, idle_timeout),
+                )
+            except requests.Timeout as exc:
+                status = "timeout"
+                raise LLMError("LLM_TIMEOUT", "The teaching model took too long to answer.", 504) from exc
+            except requests.RequestException as exc:
+                raise LLMError("LLM_UNREACHABLE", "The server could not reach the teaching model.", 502) from exc
+            status = str(resp.status_code)
+            if resp.status_code == 400 and _effort_rejected(400):
+                resp.close()
+                continue
+            break
         if resp.status_code != 200:
             _raise_status(resp, key)
         try:
@@ -237,9 +285,16 @@ def chat_json(system: str, user: str, schema: dict, schema_name: str, timeout: f
     object_messages = object_mode_messages(system, user, schema)
 
     def post(msgs: list, response_format: dict) -> requests.Response:
-        return _request("POST", "/chat/completions", timeout or config.LLM_TIMEOUT_S,
-                        json={"model": model, "messages": msgs, "temperature": 0.2, "response_format": response_format,
-                              **provider_extra_body()})
+        def send() -> requests.Response:
+            return _request("POST", "/chat/completions", timeout or config.LLM_TIMEOUT_S,
+                            json={"model": model, "messages": msgs, "temperature": 0.2, "response_format": response_format,
+                                  **request_extras()})
+        try:
+            return send()
+        except LLMError as exc:
+            if _effort_rejected(exc):
+                return send()  # same request without reasoning_effort
+            raise
 
     if (base, model) in _SCHEMA_REJECTED:
         resp = post(object_messages, object_mode)

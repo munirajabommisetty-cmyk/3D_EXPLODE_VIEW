@@ -2,7 +2,7 @@
     "rewrites": [
         {
             "source": "/api/:path*",
-            "destination": "https://threed-explode-view-2.onrender.com"
+            "destination": "https://threed-explode-view-3.onrender.com"
         }
     ]
 }

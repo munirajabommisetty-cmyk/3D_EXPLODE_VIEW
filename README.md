@@ -160,5 +160,6 @@ It runs on hardware every student already has: a laptop, a webcam and a browser.
 > **Every student deserves to ask *why*. GestureLab CAD lets them ask the machine itself.**
 
 ---
+## LIVE WEB:https://3dexplodeview-frontend.vercel.app/
 
 *Built with **Gnani Prisma** and **Gnani Timbre** · Great Indian AI Internship Challenge 2026 · Jugaad Genius Award entry · #GreatIndianAIInternshipChallenge #GnaniAI*

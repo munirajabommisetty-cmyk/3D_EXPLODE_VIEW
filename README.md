@@ -6,7 +6,9 @@ GestureLab CAD turns a 3D model of a real machine into a tutor. A learner points
 
 It is built for the **Great Indian AI Internship Challenge 2026 by Gnani AI** as an entry for the **Jugaad Genius Award** ("the most creative or unexpected use of Gnani AI's models"), and is powered by **Gnani Prisma** (speech-to-text) and **Gnani Timbre** (text-to-speech).
 
----
+--------
+
+
 
 ## 1. The Problem
 
@@ -24,6 +26,9 @@ The way machines are taught today leaves that question unanswered:
 The result: **students can see a machine, but they cannot ask it anything.**
 
 ---
+
+
+
 
 ## 2. Our Unique Solution
 
@@ -113,6 +118,8 @@ Webcam ─► MediaPipe Hand Landmarker (in the browser) ─► gestures ─► 
 
 ---
 
+
+
 ## 3. Tech Stack
 
 | Layer | Technology | Used for |
@@ -149,6 +156,9 @@ Webcam ─► MediaPipe Hand Landmarker (in the browser) ─► gestures ─► 
 
 ---
 
+
+
+
 ## 5. Conclusion
 
 GestureLab CAD starts from a simple observation: **students can see a machine, but they cannot ask it anything.** Our answer is to make the machine itself the teacher. The learner points at a part, asks in their own words and their own language, and the machine responds: the right parts light up and move while a natural voice explains, step by step, and then checks that they understood.
@@ -159,7 +169,12 @@ It runs on hardware every student already has: a laptop, a webcam and a browser.
 
 > **Every student deserves to ask *why*. GestureLab CAD lets them ask the machine itself.**
 
----
-## LIVE WEB:https://3dexplodeview-frontend.vercel.app/
+------------------------------------------------------------------------------------------------
+
+
+## live web ::  https://3dexplodeview-frontend.vercel.app/
+
+
+----------------------------------------------------------------------------------------------
 
 *Built with **Gnani Prisma** and **Gnani Timbre** · Great Indian AI Internship Challenge 2026 · Jugaad Genius Award entry · #GreatIndianAIInternshipChallenge #GnaniAI*

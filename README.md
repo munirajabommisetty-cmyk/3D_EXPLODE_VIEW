@@ -74,7 +74,7 @@ A laptop, a webcam and Gnani's Indian-language voice models stand in for an expe
 ### 2.3 Key features
 
 **Interactive 3D learning**
-- **Five learning modules:** an epicyclic planetary gearbox and a steam engine (mechanical), a reinforced-concrete building frame and a Warren truss bridge (civil), and the human eye (biology).
+- **Four interactive 3D models:** an epicyclic planetary gearbox and a steam engine (mechanical), a reinforced-concrete building frame (civil), and the human eye (biology).
 - **Exploded view and reassembly:** every part separates into a colour-coded, see-through view with labels, and goes back together in one action.
 - **Engineering inspector and assembly tree:** role, specifications, materials and a relationship map (drives, meshes with, supports) for every part; browse, search, select and hide parts.
 
@@ -148,7 +148,7 @@ Webcam ─► MediaPipe Hand Landmarker (in the browser) ─► gestures ─► 
 ## 4. Main Users
 
 **Primary users**
-- **Mechanical and civil engineering students** meeting a machine or structure for the first time: gear trains, engines, frames, trusses.
+- **Mechanical and civil engineering students** meeting a machine or structure for the first time: gear trains, engines and building frames.
 - **Diploma, polytechnic and ITI students**, who learn machine elements and mechanisms hands-on but often lack access to cut-away models and labs.
 - **Students who learn best in their own language:** learners who think in Telugu or Hindi and can now ask and hear answers in the same language, with technical terms kept in English.
 - **Self-learners revising alone**, who need an answer at the moment the doubt appears, not the next day.

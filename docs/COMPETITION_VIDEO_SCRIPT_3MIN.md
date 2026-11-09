@@ -80,11 +80,11 @@
 
 ## Act 5: Not just one student (2:25–2:48)
 
-**On screen:** the five models one after another: planetary gearbox, steam engine, reinforced-concrete building frame, truss bridge, human eye. Then a laptop with a webcam.
+**On screen:** the four models one after another: planetary gearbox, steam engine, reinforced-concrete building frame, human eye. Then a laptop with a webcam.
 **Captions:** `Diploma · ITI · polytechnic · engineering students` → `Learners who think in Telugu, Hindi and more` → `Teachers and trainers` → `A laptop, a webcam, a browser. Nothing else.`
 
 > **Narration:**
-> "And Ravi isn't one student. He's millions of diploma, ITI, polytechnic and engineering students, many in colleges that can't afford cut-away machines or labs. He's every learner who understands best in Telugu or Hindi. And he's every teacher who wants to show a machine to a whole class with just a laptop and a projector. It needs nothing more than a browser, a webcam and a microphone. A new subject is simply a new 3D model with its parts data. Today it's a gearbox, a steam engine, a building frame, a bridge and the human eye. Tomorrow, any machine, in any language Gnani speaks."
+> "And Ravi isn't one student. He's millions of diploma, ITI, polytechnic and engineering students, many in colleges that can't afford cut-away machines or labs. He's every learner who understands best in Telugu or Hindi. And he's every teacher who wants to show a machine to a whole class with just a laptop and a projector. It needs nothing more than a browser, a webcam and a microphone. A new subject is simply a new 3D model with its parts data. Today it's a gearbox, a steam engine, a building frame and the human eye. Tomorrow, any machine, in any language Gnani speaks."
 
 ## Act 6: The ending (2:48–3:00)
 
@@ -158,8 +158,8 @@ ACTS AND TIMING:
    (no real product or logo) vs. GestureLab CAD with lit gears. Captions one by one: "It sees
    what you point at" · "It shows while it speaks" · "It answers from the machine's real data" ·
    "It checks you understood" · "It speaks your language".
-5. 2:25-2:48 Not just one student. The five models in sequence (gearbox, steam engine,
-   reinforced-concrete building frame, truss bridge, human eye), then a laptop with a webcam.
+5. 2:25-2:48 Not just one student. The four models in sequence (gearbox, steam engine,
+   reinforced-concrete building frame, human eye), then a laptop with a webcam.
    Captions: "Diploma · ITI · polytechnic · engineering students" → "Learners who think in
    Telugu, Hindi and more" → "Teachers and trainers" → "A laptop, a webcam, a browser. Nothing
    else."

@@ -177,8 +177,15 @@ It runs on hardware every student already has: a laptop, a webcam and a browser.
 
 ------------------------------------------------------------------------------------------------
 
+## LIVE WEB:
 
-## live web ::  https://3dexplodeview-frontend.vercel.app/
+https://3dexplodeview-frontend.vercel.app/
+
+## DEMO LINK:
+
+https://youtu.be/m-6QilNb0AE
+
+
 
 
 ----------------------------------------------------------------------------------------------

@@ -2,6 +2,12 @@
 
 ### A 3D engineering tutor you can talk to, point at, and learn from, in your own language
 
+| | |
+| :--- | :--- |
+| 📄 **One-page solution pitch** | [docs/GestureLab_CAD_Solution_Pitch.pdf](docs/GestureLab_CAD_Solution_Pitch.pdf) |
+| 🌐 **Live app** | [https://3dexplodeview-frontend.vercel.app/](https://3dexplodeview-frontend.vercel.app/) |
+| 📘 **Full project document** (technology, gestures, voice pipeline) | [docs/GestureLab_CAD_Project_Document.pdf](docs/GestureLab_CAD_Project_Document.pdf) |
+
 GestureLab CAD turns a 3D model of a real machine into a tutor. A learner points at a part with their hand (or the mouse), asks a question out loud in **English, Telugu or Hindi**, and the machine answers: the right parts light up and move in 3D while a natural voice explains, step by step, in the same language the learner spoke.
 
 It is built for the **Great Indian AI Internship Challenge 2026 by Gnani AI** as an entry for the **Jugaad Genius Award** ("the most creative or unexpected use of Gnani AI's models"), and is powered by **Gnani Prisma** (speech-to-text) and **Gnani Timbre** (text-to-speech).

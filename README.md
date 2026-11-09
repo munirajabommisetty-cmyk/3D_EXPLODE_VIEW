@@ -181,9 +181,9 @@ It runs on hardware every student already has: a laptop, a webcam and a browser.
 
 https://3dexplodeview-frontend.vercel.app/
 
-## DEMO LINK
+## DEMO LINK:
 
-https://drive.google.com/file/d/1MLg2I3ydJhqdjJDC1ZDeKl-2RdqIB8-7/view?usp=sharing
+https://youtu.be/m-6QilNb0AE
 
 
 
